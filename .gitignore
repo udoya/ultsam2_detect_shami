@@ -1,0 +1,30 @@
+# 仮想環境フォルダ (uv venv .venv で作成した場合)
+.venv/
+venv/
+*.venv/
+
+# Python のキャッシュファイル
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE やエディタの設定ファイル (例: VS Code)
+.vscode/
+
+# OS固有のファイル (例: macOS)
+.DS_Store
+
+# その他、生成物やログなど
+/dist/
+/build/
+*.log
+*.tmp
+out/
+
+
+# dataにある動画
+data/*.mp4
+data/*.MOV
+
+
+
