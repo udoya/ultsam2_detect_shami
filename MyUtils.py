@@ -1,7 +1,6 @@
 # import
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -45,7 +44,7 @@ def get_first_frame(
     return None
 
 
-def make_dir(dir_name: str) -> None:
+def my_make_dir(dir_name: str) -> None:
     """ディレクトリを作成する関数
 
     Returns:

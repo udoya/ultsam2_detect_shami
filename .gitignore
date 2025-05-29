@@ -26,5 +26,8 @@ out/
 data/*.mp4
 data/*.MOV
 
+# sam2
+sam2*
+
 
 
