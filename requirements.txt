@@ -67,3 +67,10 @@ ultralytics==8.3.115
 ultralytics-thop==2.0.14
 urllib3==2.4.0
 wcwidth==0.2.13
+mypy==1.16.0
+mypy-extensions==1.1.0
+pathspec==0.12.1
+tomli==2.2.1
+
+opencv-stubs
+matplotlib-stubs
