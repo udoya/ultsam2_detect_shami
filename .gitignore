@@ -28,6 +28,7 @@ data/*.MOV
 
 # sam2
 sam2*
+model/
 
 
 

@@ -74,3 +74,4 @@ tomli==2.2.1
 
 opencv-stubs
 matplotlib-stubs
+mediapipe==0.10.15
