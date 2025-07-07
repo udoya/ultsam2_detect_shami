@@ -5,30 +5,22 @@ SAM2とMediaPipeを使用してフレット位置と指の位置を同時に検�
 
 from __future__ import annotations
 
-import copy
 import time
 from pathlib import Path
 from typing import Any
 
 import cv2
-import matplotlib
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image as PILImage
 from ultralytics import SAM
 from ultralytics.utils.plotting import colors
 
 # 日本語フォントの設定
-matplotlib.rcParams["font.family"] = [
+mpl.rcParams["font.family"] = [
     "DejaVu Sans",
-    "Arial Unicode MS",
-    "Yu Gothic",
-    "Meiryo",
-    "Takao",
-    "IPAexGothic",
-    "IPAPGothic",
-    "VL PGothic",
-    "Noto Sans CJK JP",
+    "Arial",
+    "sans-serif",
 ]
 
 # MediaPipeの条件付きインポート
@@ -41,8 +33,6 @@ try:
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
     print("警告: MediaPipeが利用できません。手の検出機能は無効になります。")
-
-import MyUtils
 
 
 class ShamisenFretHandTracker:
@@ -90,6 +80,14 @@ class ShamisenFretHandTracker:
 
         # フレット位置のラベル
         self.fret_labels = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+        # 三味線の音階定義(各弦の開放弦から)
+        # 1の糸(細い糸): E4, 2の糸(中糸): B3, 3の糸(太糸): E3
+        self.string_notes = {
+            "string_1": ["E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4", "C5", "C#5"],
+            "string_2": ["B3", "C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4"],
+            "string_3": ["E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3", "C4", "C#4"],
+        }
 
     def _init_hand_detector(self) -> None:
         """MediaPipe Hand Landmarkerの初期化"""
@@ -280,6 +278,168 @@ class ShamisenFretHandTracker:
 
         return [int(min_x), int(y_at_min_x), int(max_x), int(y_at_max_x)]
 
+    def estimate_played_notes(
+        self,
+        line_info: tuple[list[int], float],
+        hand_result: Any,
+        image_shape: tuple[int, int],
+    ) -> list[dict]:
+        """指の位置とフレット位置から演奏されている音を推定
+
+        Args:
+            line_info: 線分情報 (line, angle)
+            hand_result: 手の検出結果
+            image_shape: 画像の形状 (height, width)
+
+        Returns:
+            推定された音のリスト
+            [{"finger": str, "fret": int, "string": str, "note": str, "position": tuple}]
+
+        """
+        if line_info is None or hand_result is None:
+            print("デバッグ: line_info または hand_result が None です")
+            if line_info is None:
+                print("  - line_info が None")
+            if hand_result is None:
+                print("  - hand_result が None")
+            return []
+
+        print("デバッグ: 手の検出結果の確認中...")
+        if not hasattr(hand_result, "handedness") or not hasattr(hand_result, "hand_landmarks"):
+            print("  - hand_result に handedness または hand_landmarks 属性がありません")
+            return []
+
+        print(
+            f"  - 検出された手の数: {len(hand_result.handedness) if hand_result.handedness else 0}",
+        )
+
+        line, angle = line_info
+        x1, y1, x2, y2 = line
+        height, width = image_shape
+
+        print(f"デバッグ: 画像サイズ = {width}x{height}, 線分 = ({x1},{y1}) -> ({x2},{y2})")
+
+        # 弦の長さ計算
+        x_distance_mask = abs(x2 - x1)
+        x_length_string = (x_distance_mask * 4) / 3
+
+        # ブリッジ位置計算
+        x_bridge = x2 - x_length_string
+        y_bridge = y1 + (x_bridge - x1) * np.tan(np.radians(angle))
+
+        # フレット位置を計算
+        fret_positions = []
+        for i in range(len(self.fret_ratios) - 1):
+            tmp_x_distance = x_length_string * self.fret_ratios[i]
+            tmp_x = x_bridge + tmp_x_distance
+            tmp_y = y_bridge + (tmp_x - x_bridge) * np.tan(np.radians(angle))
+            fret_positions.append((tmp_x, tmp_y, i))
+
+        # 指先の位置を取得(左手のみ、人差し指・中指・薬指のみ)
+        finger_positions = []
+        finger_names = {8: "index", 12: "middle", 16: "ring"}  # 親指(4)と小指(20)を除外
+
+        print("デバッグ: 指先位置の取得開始...")
+
+        for i, (handedness, hand_landmarks) in enumerate(
+            zip(hand_result.handedness, hand_result.hand_landmarks),
+        ):
+            hand_label = handedness[0].display_name
+            print(f"  - 手 {i}: {hand_label}")
+
+            if hand_label == "Right":
+                print("    右手をスキップ")
+                continue
+
+            print("    左手を処理中...")
+            for index, landmark in enumerate(hand_landmarks):
+                if index in finger_names:
+                    visibility = landmark.visibility
+                    finger_x = int(landmark.x * width)
+                    finger_y = int(landmark.y * height)
+                    print(
+                        f"      指{index}({finger_names[index]}): 位置=({finger_x},{finger_y}), 可視性={visibility:.3f}",
+                    )
+
+                    # 可視性チェックを緩和：位置が画像内にあれば追加
+                    if 0 <= finger_x < width and 0 <= finger_y < height:
+                        finger_positions.append(
+                            {
+                                "name": finger_names[index],
+                                "position": (finger_x, finger_y),
+                                "landmark_index": index,
+                                "visibility": visibility,
+                            },
+                        )
+                        print("        -> 追加されました (位置ベース)")
+                    else:
+                        print(f"        -> 画像外のためスキップ ({finger_x}, {finger_y})")
+
+        print(f"デバッグ: 有効な指先数: {len(finger_positions)}")
+
+        # 指とフレットの対応を判定
+        played_notes = []
+        tolerance = 100  # ピクセル単位での許容範囲（大きめに設定）
+
+        print(f"デバッグ: フレット位置数: {len(fret_positions)}")
+        for i, (fret_x, fret_y, fret_index) in enumerate(fret_positions[:5]):  # 最初の5個だけ表示
+            print(f"  フレット{fret_index}: ({fret_x:.1f}, {fret_y:.1f})")
+
+        print(f"デバッグ: 指とフレットの対応判定開始 (許容範囲: {tolerance}px)...")
+
+        for finger in finger_positions:
+            finger_x, finger_y = finger["position"]
+            closest_fret = None
+            min_distance = float("inf")
+
+            print(
+                f"  指 {finger['name']} at ({finger_x}, {finger_y}) [可視性: {finger.get('visibility', 0):.3f}]:"
+            )
+
+            # 最も近いフレットを見つける
+            for fret_x, fret_y, fret_index in fret_positions:
+                distance = np.sqrt((finger_x - fret_x) ** 2 + (finger_y - fret_y) ** 2)
+                print(f"    フレット{fret_index}への距離: {distance:.1f}px")
+                if distance < min_distance:
+                    min_distance = distance
+                    if distance < tolerance:
+                        closest_fret = fret_index
+
+            print(f"    最近フレット: {closest_fret}, 距離: {min_distance:.1f}px")
+
+            # フレットが見つからない場合でも、弦の判定だけ行って開放弦として扱う
+            if closest_fret is None and min_distance < tolerance * 2:  # より広い範囲で開放弦を検討
+                closest_fret = 0  # 開放弦として扱う
+                print("    -> 開放弦として扱います")
+
+            if closest_fret is not None:
+                # 弦の判定を行わず、全ての弦の音を候補として出力
+                all_possible_notes = []
+
+                # 各弦で該当するフレット位置の音を取得
+                for string_name, notes in self.string_notes.items():
+                    if closest_fret < len(notes):
+                        note = notes[closest_fret]
+                        all_possible_notes.append(
+                            {
+                                "finger": finger["name"],
+                                "fret": closest_fret,
+                                "string": string_name,
+                                "note": note,
+                                "position": finger["position"],
+                                "distance": min_distance,
+                            }
+                        )
+
+                # 全ての候補音を追加
+                played_notes.extend(all_possible_notes)
+                print(f"    -> 音追加 (全弦): {[note['note'] for note in all_possible_notes]}")
+            else:
+                print("    -> フレットが見つかりません")
+
+        print(f"デバッグ: 最終的な演奏音数: {len(played_notes)}")
+        return played_notes
+
     def detect_hands(self, frame: np.ndarray) -> tuple[Any, list[list[int]]]:
         """手の検出を行う
 
@@ -308,7 +468,7 @@ class ShamisenFretHandTracker:
         return detection_result, bboxes
 
     def _calc_bounding_rect(self, image: np.ndarray, detection_result: Any) -> list[list[int]]:
-        """手のランドマークからバウンディングボックスを計算（左手のみ）"""
+        """手のランドマークからバウンディングボックスを計算(左手のみ)"""
         image_width, image_height = image.shape[1], image.shape[0]
         bboxes = []
 
@@ -316,7 +476,9 @@ class ShamisenFretHandTracker:
             detection_result.handedness,
             detection_result.hand_landmarks,
         ):
-            # 右手をスキップ（左手のみ処理）
+            # 右手をスキップ(左手のみ処理)
+            if handedness[0].display_name == "Right":
+                continue
 
             landmark_array = np.empty((0, 2), int)
             for landmark in hand_landmarks:
@@ -342,13 +504,13 @@ class ShamisenFretHandTracker:
 
         image_width, image_height = image.shape[1], image.shape[0]
 
-        # ランドマークの描画情報
+        # ランドマークの描画情報（人差し指・中指・薬指のみ強調）
         landmark_colors = {
-            4: (0, 255, 255),  # 親指先端
-            8: (128, 0, 255),  # 人差し指先端
-            12: (128, 128, 0),  # 中指先端
-            16: (192, 192, 192),  # 薬指先端
-            20: (220, 20, 60),  # 小指先端
+            4: (128, 128, 128),  # 親指先端（グレー、検出対象外）
+            8: (128, 0, 255),  # 人差し指先端（紫）
+            12: (128, 128, 0),  # 中指先端（オリーブ）
+            16: (192, 192, 192),  # 薬指先端（シルバー）
+            20: (128, 128, 128),  # 小指先端（グレー、検出対象外）
         }
 
         # 接続線の情報
@@ -380,7 +542,7 @@ class ShamisenFretHandTracker:
             detection_result.hand_landmarks,
             bboxes,
         ):
-            # 右手をスキップ（左手のみ表示）
+            # 右手をスキップ(左手のみ表示)
             if handedness[0].display_name == "Right":
                 continue
 
@@ -509,6 +671,223 @@ class ShamisenFretHandTracker:
 
         return image
 
+    def draw_estimated_notes(
+        self,
+        image: np.ndarray,
+        played_notes: list[dict],
+    ) -> np.ndarray:
+        """推定された音を画像上に描画する
+
+        Args:
+            image: 描画対象の画像
+            played_notes: 推定された音のリスト
+
+        Returns:
+            音名が描画された画像
+
+        """
+        if not played_notes:
+            return image
+
+        # 音名表示用の設定
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+
+        # 音名ごとに色を変える
+        note_colors = {
+            "C": (255, 0, 0),  # 赤
+            "C#": (255, 127, 0),  # オレンジ
+            "D": (255, 255, 0),  # 黄
+            "D#": (127, 255, 0),  # 黄緑
+            "E": (0, 255, 0),  # 緑
+            "F": (0, 255, 127),  # 青緑
+            "F#": (0, 255, 255),  # シアン
+            "G": (0, 127, 255),  # 青
+            "G#": (0, 0, 255),  # 青
+            "A": (127, 0, 255),  # 紫
+            "A#": (255, 0, 255),  # マゼンタ
+            "B": (255, 0, 127),  # ピンク
+        }
+
+        # 指先にシンプルな音名表示
+        for note_info in played_notes:
+            finger_x, finger_y = note_info["position"]
+            note = note_info["note"]
+
+            # 音名の基本名(オクターブ番号を除く)
+            note_base = note[:-1] if note[-1].isdigit() else note
+            color = note_colors.get(note_base, (255, 255, 255))  # デフォルトは白
+
+            # 指先に小さな円を描画
+            cv2.circle(image, (finger_x, finger_y), 3, color, -1)
+
+        # 画像右下にターミナル風リスト表示
+        self._draw_notes_terminal_style(image, played_notes, note_colors)
+
+        return image
+
+    def _draw_notes_terminal_style(
+        self,
+        image: np.ndarray,
+        played_notes: list[dict],
+        note_colors: dict,
+    ) -> None:
+        """画像右下にターミナル風の音階リストを描画"""
+        if not played_notes:
+            return
+
+        height, width = image.shape[:2]
+
+        # ターミナル風背景の設定
+        terminal_font = cv2.FONT_HERSHEY_SIMPLEX
+        terminal_font_scale = 0.6
+        terminal_thickness = 1
+        line_height = 25
+        padding = 10
+
+        # 指ごとに音をグループ化
+        finger_notes = {}
+        for note_info in played_notes:
+            finger = note_info["finger"]
+            if finger not in finger_notes:
+                finger_notes[finger] = []
+            finger_notes[finger].append(note_info)
+
+        # 表示するテキストを準備
+        display_lines = ["=== Detected Notes ==="]
+        for finger, notes in finger_notes.items():
+            finger_display = {"index": "Index", "middle": "Middle", "ring": "Ring"}
+            finger_name = finger_display.get(finger, finger.capitalize())
+
+            # 各弦の音をまとめて表示
+            string_notes = {}
+            for note in notes:
+                string = note["string"]
+                if string not in string_notes:
+                    string_notes[string] = []
+                string_notes[string].append(note["note"])
+
+            display_lines.append(f"{finger_name}: Fret{notes[0]['fret']}")
+            for string, notes_list in string_notes.items():
+                string_num = string.split("_")[1]
+                display_lines.append(f"  S{string_num}: {', '.join(notes_list)}")
+
+        # 背景のサイズを計算
+        max_text_width = 0
+        for line in display_lines:
+            text_size = cv2.getTextSize(
+                line, terminal_font, terminal_font_scale, terminal_thickness
+            )[0]
+            max_text_width = max(max_text_width, text_size[0])
+
+        terminal_width = max_text_width + padding * 2
+        terminal_height = len(display_lines) * line_height + padding * 2
+
+        # 右下の位置を計算
+        terminal_x = width - terminal_width - 20
+        terminal_y = height - terminal_height - 20
+
+        # ターミナル風背景を描画（半透明の黒）
+        overlay = image.copy()
+        cv2.rectangle(
+            overlay,
+            (terminal_x, terminal_y),
+            (terminal_x + terminal_width, terminal_y + terminal_height),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.8, image, 0.2, 0, image)
+
+        # 枠線を描画
+        cv2.rectangle(
+            image,
+            (terminal_x, terminal_y),
+            (terminal_x + terminal_width, terminal_y + terminal_height),
+            (100, 100, 100),
+            2,
+        )
+
+        # テキストを描画
+        for i, line in enumerate(display_lines):
+            text_x = terminal_x + padding
+            text_y = terminal_y + padding + (i + 1) * line_height
+
+            # ヘッダー行は白、その他は緑色
+            if i == 0:
+                text_color = (255, 255, 255)  # 白
+            elif line.startswith("  S"):
+                # 音名部分の色付け
+                parts = line.split(": ")
+                if len(parts) == 2:
+                    # "  S1: " 部分を緑で描画
+                    cv2.putText(
+                        image,
+                        parts[0] + ": ",
+                        (text_x, text_y),
+                        terminal_font,
+                        terminal_font_scale,
+                        (0, 255, 0),  # 緑
+                        terminal_thickness,
+                        cv2.LINE_AA,
+                    )
+
+                    # 音名部分を音に応じた色で描画
+                    prefix_width = cv2.getTextSize(
+                        parts[0] + ": ", terminal_font, terminal_font_scale, terminal_thickness
+                    )[0][0]
+                    notes_text = parts[1]
+
+                    # 各音名を個別に色付け
+                    note_x_offset = 0
+                    for note in notes_text.split(", "):
+                        note_base = note[:-1] if note[-1].isdigit() else note
+                        note_color = note_colors.get(note_base, (255, 255, 255))
+
+                        cv2.putText(
+                            image,
+                            note,
+                            (text_x + prefix_width + note_x_offset, text_y),
+                            terminal_font,
+                            terminal_font_scale,
+                            note_color,
+                            terminal_thickness,
+                            cv2.LINE_AA,
+                        )
+
+                        note_width = cv2.getTextSize(
+                            note, terminal_font, terminal_font_scale, terminal_thickness
+                        )[0][0]
+                        note_x_offset += (
+                            note_width
+                            + cv2.getTextSize(
+                                ", ", terminal_font, terminal_font_scale, terminal_thickness
+                            )[0][0]
+                        )
+                else:
+                    cv2.putText(
+                        image,
+                        line,
+                        (text_x, text_y),
+                        terminal_font,
+                        terminal_font_scale,
+                        (0, 255, 0),  # 緑
+                        terminal_thickness,
+                        cv2.LINE_AA,
+                    )
+            else:
+                text_color = (0, 255, 0)  # 緑
+                cv2.putText(
+                    image,
+                    line,
+                    (text_x, text_y),
+                    terminal_font,
+                    terminal_font_scale,
+                    text_color,
+                    terminal_thickness,
+                    cv2.LINE_AA,
+                )
+
     def process_image(
         self,
         image_path: str,
@@ -545,6 +924,26 @@ class ShamisenFretHandTracker:
         # 手のランドマーク描画
         if hand_result:
             result_image = self.draw_hands(result_image, hand_result, hand_bboxes)
+
+        # 演奏音の推定と描画
+        if hand_result and line_info:
+            played_notes = self.estimate_played_notes(
+                line_info,
+                hand_result,
+                (frame.shape[0], frame.shape[1]),
+            )
+            result_image = self.draw_estimated_notes(result_image, played_notes)
+
+            # 推定された音の情報をコンソールに出力
+            if played_notes:
+                print("推定された演奏音:")
+                for note_info in played_notes:
+                    print(
+                        f"  {note_info['finger']} -> フレット{note_info['fret']} "
+                        f"({note_info['string']}) -> {note_info['note']}",
+                    )
+            else:
+                print("演奏音が検出されませんでした。")
 
         # 結果保存
         if output_dir:
