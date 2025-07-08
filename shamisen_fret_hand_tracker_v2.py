@@ -280,14 +280,14 @@ class ShamisenFretHandTracker:
 
     def estimate_played_notes(
         self,
-        line_info: tuple[list[int], float],
+        fret_positions: list[tuple[float, float, int]],
         hand_result: Any,
         image_shape: tuple[int, int],
     ) -> list[dict]:
         """指の位置とフレット位置から演奏されている音を推定
 
         Args:
-            line_info: 線分情報 (line, angle)
+            fret_positions: 計算済みのフレット位置リスト [(x, y, fret_index), ...]
             hand_result: 手の検出結果
             image_shape: 画像の形状 (height, width)
 
@@ -296,10 +296,10 @@ class ShamisenFretHandTracker:
             [{"finger": str, "fret": int, "string": str, "note": str, "position": tuple}]
 
         """
-        if line_info is None or hand_result is None:
-            print("デバッグ: line_info または hand_result が None です")
-            if line_info is None:
-                print("  - line_info が None")
+        if not fret_positions or hand_result is None:
+            print("デバッグ: fret_positions または hand_result が空/None です")
+            if not fret_positions:
+                print("  - fret_positions が空")
             if hand_result is None:
                 print("  - hand_result が None")
             return []
@@ -313,27 +313,8 @@ class ShamisenFretHandTracker:
             f"  - 検出された手の数: {len(hand_result.handedness) if hand_result.handedness else 0}",
         )
 
-        line, angle = line_info
-        x1, y1, x2, y2 = line
         height, width = image_shape
-
-        print(f"デバッグ: 画像サイズ = {width}x{height}, 線分 = ({x1},{y1}) -> ({x2},{y2})")
-
-        # 弦の長さ計算
-        x_distance_mask = abs(x2 - x1)
-        x_length_string = (x_distance_mask * 4) / 3
-
-        # ブリッジ位置計算
-        x_bridge = x2 - x_length_string
-        y_bridge = y1 + (x_bridge - x1) * np.tan(np.radians(angle))
-
-        # フレット位置を計算
-        fret_positions = []
-        for i in range(len(self.fret_ratios) - 1):
-            tmp_x_distance = x_length_string * self.fret_ratios[i]
-            tmp_x = x_bridge + tmp_x_distance
-            tmp_y = y_bridge + (tmp_x - x_bridge) * np.tan(np.radians(angle))
-            fret_positions.append((tmp_x, tmp_y, i))
+        print(f"デバッグ: 画像サイズ = {width}x{height}")
 
         # 指先の位置を取得(左手のみ、人差し指・中指・薬指のみ)
         finger_positions = []
@@ -376,6 +357,7 @@ class ShamisenFretHandTracker:
                         print(f"        -> 画像外のためスキップ ({finger_x}, {finger_y})")
 
         print(f"デバッグ: 有効な指先数: {len(finger_positions)}")
+        print(fret_positions, "フレット位置の確認...")
 
         # 指とフレットの対応を判定
         played_notes = []
@@ -393,17 +375,17 @@ class ShamisenFretHandTracker:
             min_distance = float("inf")
 
             print(
-                f"  指 {finger['name']} at ({finger_x}, {finger_y}) [可視性: {finger.get('visibility', 0):.3f}]:"
+                f"  指 {finger['name']} at ({finger_x}, {finger_y}) [可視性: {finger.get('visibility', 0):.3f}]:",
             )
 
             # 最も近いフレットを見つける
             for fret_x, fret_y, fret_index in fret_positions:
                 distance = np.sqrt((finger_x - fret_x) ** 2 + (finger_y - fret_y) ** 2)
-                print(f"    フレット{fret_index}への距離: {distance:.1f}px")
+                print(f"    フレット{fret_index + 1}への距離: {distance:.1f}px")
                 if distance < min_distance:
                     min_distance = distance
                     if distance < tolerance:
-                        closest_fret = fret_index
+                        closest_fret = fret_index + 1
 
             print(f"    最近フレット: {closest_fret}, 距離: {min_distance:.1f}px")
 
@@ -428,7 +410,7 @@ class ShamisenFretHandTracker:
                                 "note": note,
                                 "position": finger["position"],
                                 "distance": min_distance,
-                            }
+                            },
                         )
 
                 # 全ての候補音を追加
@@ -505,12 +487,20 @@ class ShamisenFretHandTracker:
         image_width, image_height = image.shape[1], image.shape[0]
 
         # ランドマークの描画情報（人差し指・中指・薬指のみ強調）
+        # landmark_colors = {
+        #     4: (128, 128, 128),  # 親指先端（グレー、検出対象外）
+        #     8: (128, 0, 255),  # 人差し指先端（紫）
+        #     12: (128, 128, 0),  # 中指先端（オリーブ）
+        #     16: (192, 192, 192),  # 薬指先端（シルバー）
+        #     20: (128, 128, 128),  # 小指先端（グレー、検出対象外）
+        # }
+
         landmark_colors = {
-            4: (128, 128, 128),  # 親指先端（グレー、検出対象外）
-            8: (128, 0, 255),  # 人差し指先端（紫）
-            12: (128, 128, 0),  # 中指先端（オリーブ）
-            16: (192, 192, 192),  # 薬指先端（シルバー）
-            20: (128, 128, 128),  # 小指先端（グレー、検出対象外）
+            4: (0, 255, 255),  # 親指先端
+            8: (128, 0, 255),  # 人差し指先端
+            12: (128, 128, 0),  # 中指先端
+            16: (192, 192, 192),  # 薬指先端
+            20: (220, 20, 60),  # 小指先端
         }
 
         # 接続線の情報
@@ -542,10 +532,6 @@ class ShamisenFretHandTracker:
             detection_result.hand_landmarks,
             bboxes,
         ):
-            # 右手をスキップ(左手のみ表示)
-            if handedness[0].display_name == "Right":
-                continue
-
             # ランドマーク座標を整理
             landmark_dict = {}
             for index, landmark in enumerate(hand_landmarks):
@@ -629,14 +615,13 @@ class ShamisenFretHandTracker:
             2,
         )
 
+        # 統一計算メソッドを使用してフレット位置を取得
+        fret_positions = self.calculate_fret_positions(line_info)
+
         # フレット位置計算と描画
         slope_perpendicular = -1 / np.tan(np.radians(angle))
 
-        for i in range(len(self.fret_ratios) - 1):
-            tmp_x_distance = x_length_string * self.fret_ratios[i]
-            tmp_x = x_bridge + tmp_x_distance
-            tmp_y = y_bridge + (tmp_x - x_bridge) * np.tan(np.radians(angle))
-
+        for tmp_x, tmp_y, i in fret_positions:
             # フレット番号のラベル
             text_quo = i // len(self.fret_labels)
             text_mod = i % len(self.fret_labels)
@@ -654,6 +639,9 @@ class ShamisenFretHandTracker:
                 (0, 0, 0),
                 2,
             )
+
+            # print tmpx, y
+            print(f"フレット位置: ({tmp_x:.1f}, {tmp_y:.1f}), フレット番号: {text}")
 
             # フレットに垂直な線を描画
             b = tmp_y - tmp_x * slope_perpendicular
@@ -777,7 +765,10 @@ class ShamisenFretHandTracker:
         max_text_width = 0
         for line in display_lines:
             text_size = cv2.getTextSize(
-                line, terminal_font, terminal_font_scale, terminal_thickness
+                line,
+                terminal_font,
+                terminal_font_scale,
+                terminal_thickness,
             )[0]
             max_text_width = max(max_text_width, text_size[0])
 
@@ -834,7 +825,10 @@ class ShamisenFretHandTracker:
 
                     # 音名部分を音に応じた色で描画
                     prefix_width = cv2.getTextSize(
-                        parts[0] + ": ", terminal_font, terminal_font_scale, terminal_thickness
+                        parts[0] + ": ",
+                        terminal_font,
+                        terminal_font_scale,
+                        terminal_thickness,
                     )[0][0]
                     notes_text = parts[1]
 
@@ -856,12 +850,18 @@ class ShamisenFretHandTracker:
                         )
 
                         note_width = cv2.getTextSize(
-                            note, terminal_font, terminal_font_scale, terminal_thickness
+                            note,
+                            terminal_font,
+                            terminal_font_scale,
+                            terminal_thickness,
                         )[0][0]
                         note_x_offset += (
                             note_width
                             + cv2.getTextSize(
-                                ", ", terminal_font, terminal_font_scale, terminal_thickness
+                                ", ",
+                                terminal_font,
+                                terminal_font_scale,
+                                terminal_thickness,
                             )[0][0]
                         )
                 else:
@@ -927,8 +927,11 @@ class ShamisenFretHandTracker:
 
         # 演奏音の推定と描画
         if hand_result and line_info:
+            # フレット位置を統一計算メソッドで計算
+            fret_positions = self.calculate_fret_positions(line_info)
+
             played_notes = self.estimate_played_notes(
-                line_info,
+                fret_positions,
                 hand_result,
                 (frame.shape[0], frame.shape[1]),
             )
@@ -954,6 +957,43 @@ class ShamisenFretHandTracker:
             print(f"結果を保存しました: {output_path}")
 
         return result_image
+
+    def calculate_fret_positions(
+        self,
+        line_info: tuple[list[int], float],
+    ) -> list[tuple[float, float, int]]:
+        """フレット位置を計算する統一メソッド
+
+        Args:
+            line_info: 線分情報 (line, angle)
+
+        Returns:
+            フレット位置のリスト [(x, y, fret_index), ...]
+
+        """
+        if line_info is None:
+            return []
+
+        line, angle = line_info
+        x1, y1, x2, y2 = line
+
+        # 弦の長さ計算(画像上での三味線の棹の長さを推定)
+        x_distance_mask = abs(x2 - x1)
+        x_length_string = (x_distance_mask * 4) / 3
+
+        # ブリッジ位置計算
+        x_bridge = x2 - x_length_string
+        y_bridge = y1 + (x_bridge - x1) * np.tan(np.radians(angle))
+
+        # フレット位置を計算
+        fret_positions = []
+        for i in range(len(self.fret_ratios) - 1):
+            tmp_x_distance = x_length_string * self.fret_ratios[i]
+            tmp_x = x_bridge + tmp_x_distance
+            tmp_y = y_bridge + (tmp_x - x_bridge) * np.tan(np.radians(angle))
+            fret_positions.append((tmp_x, tmp_y, i))
+
+        return fret_positions
 
 
 def main() -> None:
