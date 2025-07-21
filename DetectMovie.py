@@ -19,7 +19,7 @@ def main():
         tracking_bbox = None  # 追跡中のBBoxをここに入れる
 
         video_path = "data/forsegment.mp4"  # <<< 入力動画のパス
-        # initial_bbox = [300, 20, 780, 380]
+        initial_bbox = [600, 300, 1900, 800]
 
         output_path = "data/output2.mp4"  # <<< 出力先のパス
 
@@ -47,14 +47,6 @@ def main():
     sam_interval = 2
     last_annotated_frame = None
 
-    initial_bbox = [600, 300, 600 + 1150, 300 + 500]
-    exclude_bbox = [
-        initial_bbox[3] + 5,
-        0,
-        width,
-        height,
-    ]  # 除外領域のBBox
-
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -78,7 +70,6 @@ def main():
                     frame,
                     bboxes=[prompt_bbox],
                     stream=True,
-                    exclude_bboxes=[exclude_bbox],
                 )
 
                 # ジェネレータから結果を取り出して描画
