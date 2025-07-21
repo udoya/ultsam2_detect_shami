@@ -159,8 +159,11 @@ class ShamisenFretHandTracker:
             # マスクをNumPy配列に変換
             mask_array = mask.data.cpu().numpy()
 
+            # x座標の最大値の0.95倍を超える部分のマスクを削除
+            trimmed_mask_array = self._trim_mask_by_x_coordinate(mask_array, trim_ratio=0.9)
+
             # マスクの分断部分を接続
-            connected_mask = self._connect_mask_segments(mask_array)
+            connected_mask = self._connect_mask_segments(trimmed_mask_array)
             connected_mask_array = np.array([connected_mask])
 
             # マスク画像に追加
@@ -171,15 +174,15 @@ class ShamisenFretHandTracker:
 
             if line is not None:
                 # 線分をマスクの端まで延長
-                extended_line = self._extend_line_to_mask_x_bounds(line, mask_array)
+                extended_line = self._extend_line_to_mask_x_bounds(line, trimmed_mask_array)
                 x1, y1, x2, y2 = extended_line
                 cv2.line(overlay_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 line_info = (extended_line, angle)
 
-            # オーバーレイ画像に半透明でマスクを追加
+            # オーバーレイ画像に半透明でマスクを追加（トリミング後のマスクを使用）
             color = colors(i, bgr=True)
             color_mask = np.zeros_like(frame)
-            color_mask[mask_array[0] > 0] = color
+            color_mask[trimmed_mask_array[0] > 0] = color
             overlay_frame = cv2.addWeighted(overlay_frame, 1.0, color_mask, 0.5, 0)
 
         mask_frame_color = cv2.cvtColor(mask_frame, cv2.COLOR_GRAY2BGR)
@@ -989,7 +992,10 @@ class ShamisenFretHandTracker:
 
         try:
             # 三味線の棹検出
-            sam_result, line_info, overlay_frame = self.detect_shamisen_neck(temp_image_path, current_bbox)
+            sam_result, line_info, overlay_frame = self.detect_shamisen_neck(
+                temp_image_path,
+                current_bbox,
+            )
 
             # 新しい追跡ボックスを取得
             new_tracking_bbox = None
@@ -1095,7 +1101,9 @@ class ShamisenFretHandTracker:
                     bbox_to_use = initial_bbox if frame_count == 0 else None
 
                     processed_frame, new_tracking_bbox = self.process_frame(
-                        frame, bbox_to_use, tracking_bbox
+                        frame,
+                        bbox_to_use,
+                        tracking_bbox,
                     )
 
                     if new_tracking_bbox is not None:
@@ -1108,7 +1116,9 @@ class ShamisenFretHandTracker:
                     last_processed_frame = processed_frame
                 else:
                     # SAM処理しないフレームは前回の結果を使用
-                    processed_frame = last_processed_frame if last_processed_frame is not None else frame
+                    processed_frame = (
+                        last_processed_frame if last_processed_frame is not None else frame
+                    )
 
                 # 結果の書き込み
                 if writer and processed_frame is not None:
@@ -1140,7 +1150,76 @@ class ShamisenFretHandTracker:
             else:
                 print("処理完了!")
 
-    # ...existing code...
+    def _trim_mask_by_x_coordinate(
+        self,
+        mask_array: np.ndarray,
+        trim_ratio: float = 0.95,
+    ) -> np.ndarray:
+        """x座標の最大値の指定倍率を超える部分のマスクを削除
+
+        Args:
+            mask_array: 入力マスク配列
+            trim_ratio: 最大x座標にかける倍率(デフォルト: 0.95)
+
+        Returns:
+            トリミングされたマスク配列
+
+        """
+        # 定数定義
+        MASK_3D_CHANNELS = 3
+        MASK_2D_CHANNELS = 2
+
+        # マスクの次元を確認
+        if mask_array.ndim == MASK_3D_CHANNELS and mask_array.shape[0] == 1:
+            mask_2d = mask_array[0]
+            return_3d = True
+        elif mask_array.ndim == MASK_2D_CHANNELS:
+            mask_2d = mask_array
+            return_3d = False
+        else:
+            mask_2d = np.squeeze(mask_array)
+            return_3d = mask_array.ndim == MASK_3D_CHANNELS
+
+        # マスクが存在するピクセルの座標を取得
+        y_indices, x_indices = np.where(mask_2d > 0)
+
+        if len(x_indices) == 0:
+            # マスクが空の場合はそのまま返す
+            print("デバッグ: マスクが空のため、トリミングをスキップします")
+            return mask_array
+
+        # x座標の最大値と閾値を計算
+        max_x = np.max(x_indices)
+        x_threshold = max_x * trim_ratio
+
+        print(f"デバッグ: マスクx座標範囲: {np.min(x_indices)} - {max_x}")
+        print(f"デバッグ: x座標閾値: {x_threshold:.1f} (最大値の{trim_ratio}倍)")
+
+        # 新しいマスクを作成
+        trimmed_mask = mask_2d.copy()
+
+        # 閾値を超えるx座標の部分をゼロにする
+        trimmed_mask[:, int(x_threshold) :] = 0
+
+        # トリミング後の統計
+        trimmed_y_indices, trimmed_x_indices = np.where(trimmed_mask > 0)
+        if len(trimmed_x_indices) > 0:
+            print(
+                f"デバッグ: トリミング後x座標範囲: "
+                f"{np.min(trimmed_x_indices)} - {np.max(trimmed_x_indices)}",
+            )
+            removed_pixels = len(x_indices) - len(trimmed_x_indices)
+            removal_percentage = removed_pixels / len(x_indices) * 100
+            print(
+                f"デバッグ: 削除されたピクセル数: {removed_pixels} ({removal_percentage:.1f}%)",
+            )
+        else:
+            print("警告: トリミング後にマスクが空になりました")
+
+        # 元の次元に合わせて返す
+        if return_3d:
+            return np.array([trimmed_mask])
+        return trimmed_mask
 
     def calculate_fret_positions(
         self,
@@ -1192,10 +1271,10 @@ def main() -> None:
 
     # 動画処理の設定
     sam_interval = 2  # 2フレームに1回SAM処理
-    max_frames = 60  # 最大60フレームまで処理（テスト用）
+    max_frames = 60  # 最大60フレームまで処理(テスト用)
 
     # 処理実行
-    print("三味線のフレット位置と手の検出（動画）を開始...")
+    print("三味線のフレット位置と手の検出(動画)を開始...")
     tracker.process_video(
         video_path=video_path,
         initial_bbox=initial_bbox,
@@ -1208,7 +1287,7 @@ def main() -> None:
 
 
 def main_image() -> None:
-    """画像処理モード（従来の処理）"""
+    """画像処理モード(従来の処理)"""
     # 初期化
     tracker = ShamisenFretHandTracker(model_name="sam2.1_t.pt")
 
