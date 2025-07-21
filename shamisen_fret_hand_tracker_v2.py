@@ -83,10 +83,11 @@ class ShamisenFretHandTracker:
 
         # 三味線の音階定義(各弦の開放弦から)
         # 1の糸(細い糸): E4, 2の糸(中糸): B3, 3の糸(太糸): E3
+        # 本調子(D-G-D, 1~9, 1が開放弦)
         self.string_notes = {
-            "string_1": ["E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4", "C5", "C#5"],
-            "string_2": ["B3", "C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4"],
-            "string_3": ["E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3", "C4", "C#4"],
+            "string_3": ["D4", "Eb4", "E4", "F4", "G4", "Ab4", "A4", "Bb4", "C6"],
+            "string_2": ["G3", "Ab3", "A3", "Bb3", "C4", "Db4", "D4", "Eb4", "F4", "G4"],
+            "string_1": ["D3", "Eb3", "E3", "F3", "G3", "Ab3", "A3", "Bb3", "C4"],
         }
 
     def _init_hand_detector(self) -> None:
@@ -391,7 +392,7 @@ class ShamisenFretHandTracker:
 
             # フレットが見つからない場合でも、弦の判定だけ行って開放弦として扱う
             if closest_fret is None and min_distance < tolerance * 2:  # より広い範囲で開放弦を検討
-                closest_fret = 0  # 開放弦として扱う
+                closest_fret = 1  # 開放弦として扱う
                 print("    -> 開放弦として扱います")
 
             if closest_fret is not None:
@@ -1002,9 +1003,11 @@ def main() -> None:
     tracker = ShamisenFretHandTracker(model_name="sam2.1_t.pt")
 
     # 設定
-    image_path = "./data/first_frame.jpg"
-    bbox = [600, 400, 1500, 800]  # 三味線の棹のバウンディングボックス
+    # image_path = "./data/first_frame.jpg"
+    # bbox = [600, 400, 1500, 800]  # 三味線の棹のバウンディングボックス
 
+    image_path = "./data/image.png"
+    bbox = [300, 20, 780, 380]
     # 出力ディレクトリ設定
     timestamp_mmdd = time.strftime("%m%d")
     output_dir = f"./out/{timestamp_mmdd}/shamisen_fret_hand"

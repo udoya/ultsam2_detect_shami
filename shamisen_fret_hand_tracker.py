@@ -558,8 +558,11 @@ def main() -> None:
     tracker = ShamisenFretHandTracker(model_name="sam2.1_t.pt")
 
     # 設定
-    image_path = "./data/first_frame.jpg"
-    bbox = [600, 400, 1500, 800]  # 三味線の棹のバウンディングボックス
+    # image_path = "./data/first_frame.jpg"
+    # bbox = [600, 400, 1500, 800]  # 三味線の棹のバウンディングボックス
+
+    image_path = "./data/image.png"
+    bbox = [300, 20, 780, 380]
 
     # 出力ディレクトリ設定
     timestamp_mmdd = time.strftime("%m%d")
