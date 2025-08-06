@@ -1,5 +1,9 @@
-video_path = "data/forsegment.mp4"  # <<< 入力動画のパス
-initial_bbox = [600, 300, 1200, 500]
+# video_path = "data/forsegment.mp4"  # <<< 入力動画のパス
+# initial_bbox = [600, 300, 1200, 500]
+
+
+video_path = "data/ForMovie3.mp4"
+initial_bbox = [600, 400, 1700 - 600, 800 - 400]
 
 import cv2
 import numpy as np

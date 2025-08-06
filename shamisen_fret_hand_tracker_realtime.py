@@ -35,6 +35,65 @@ except ImportError:
     print("警告: MediaPipeが利用できません。手の検出機能は無効になります。")
 
 
+class BoundingBoxSelector:
+    """マウスでバウンディングボックスを選択するためのクラス"""
+
+    def __init__(self):
+        self.start_point = None
+        self.end_point = None
+        self.selecting = False
+        self.bbox = None
+
+    def mouse_callback(self, event, x, y, flags, param):
+        """マウスイベントのコールバック関数"""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.start_point = (x, y)
+            self.selecting = True
+            self.bbox = None
+
+        elif event == cv2.EVENT_MOUSEMOVE and self.selecting:
+            self.end_point = (x, y)
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.end_point = (x, y)
+            self.selecting = False
+            if self.start_point and self.end_point:
+                x1, y1 = self.start_point
+                x2, y2 = self.end_point
+                self.bbox = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+
+    def draw_selection(self, image):
+        """選択中のバウンディングボックスを描画"""
+        if self.selecting and self.start_point and self.end_point:
+            cv2.rectangle(image, self.start_point, self.end_point, (0, 255, 0), 2)
+
+    def get_bbox(self):
+        """現在のバウンディングボックスを取得"""
+        return self.bbox
+
+
+class FPSCounter:
+    """FPSカウンタークラス"""
+
+    def __init__(self, window_size=30):
+        self.window_size = window_size
+        self.timestamps = []
+
+    def update(self):
+        """現在のタイムスタンプを記録"""
+        current_time = time.time()
+        self.timestamps.append(current_time)
+        if len(self.timestamps) > self.window_size:
+            self.timestamps.pop(0)
+
+    def get_fps(self):
+        """現在のFPSを計算"""
+        if len(self.timestamps) < 2:
+            return 0.0
+        time_span = self.timestamps[-1] - self.timestamps[0]
+        return (len(self.timestamps) - 1) / max(time_span, 0.001)
+
+
 class ShamisenFretHandTracker:
     """三味線のフレット位置と手の指先を同時に検出・トラッキングするクラス"""
 
@@ -1157,6 +1216,250 @@ class ShamisenFretHandTracker:
             else:
                 print("処理完了!")
 
+    def process_realtime(
+        self,
+        camera_id: int = 3,
+        initial_bbox: list[int] | None = None,
+        sam_interval: int = 2,
+        output_path: str | None = None,
+    ) -> None:
+        """リアルタイムカメラqからの映像を処理してフレット位置と手の検出を行う
+
+        Args:
+            camera_id: カメラのID（通常は0）
+            initial_bbox: 初期バウンディングボックス（Noneの場合は手動設定）
+            sam_interval: SAM処理の間隔（フレーム数）
+            output_path: 録画保存先パス（Noneで録画しない）
+
+        """
+        # カメラの初期化
+        print(f"カメラ {camera_id} の初期化を試行中...")
+        cap = cv2.VideoCapture(camera_id)
+
+        # カメラが開けるか確認
+        if not cap.isOpened():
+            print(f"エラー: カメラ {camera_id} を開けませんでした")
+            print("利用可能なカメラを確認中...")
+
+            # 他のカメラIDを試す
+            for test_id in range(5):
+                test_cap = cv2.VideoCapture(test_id)
+                if test_cap.isOpened():
+                    print(f"カメラ ID {test_id} が利用可能です")
+                    test_cap.release()
+                else:
+                    print(f"カメラ ID {test_id} は利用できません")
+            return
+
+        # カメラの詳細情報を表示
+        print(f"カメラ {camera_id} を正常に開きました")
+
+        # カメラの設定を試行
+        print("カメラの設定を行います...")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+
+        # 実際の設定を取得
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        print(f"カメラ情報: {width}x{height}, {fps:.2f}fps")
+
+        # テストフレームの取得
+        print("テストフレームを取得中...")
+        ret, test_frame = cap.read()
+        if not ret or test_frame is None:
+            print("エラー: テストフレームの取得に失敗しました")
+            cap.release()
+            return
+
+        print(f"テストフレーム: {test_frame.shape}, dtype: {test_frame.dtype}")
+        print("カメラの初期化が完了しました")
+        print("操作:")
+        print("  'q' または ESC: 終了")
+        print("  's': スクリーンショット保存")
+        print("  'r': 録画開始/停止")
+        if initial_bbox is None:
+            print("  マウスで三味線の棹を囲んでバウンディングボックスを設定してください")
+
+        # 録画用ライター
+        writer = None
+        is_recording = False
+
+        # バウンディングボックス設定用の変数
+        bbox_selector = BoundingBoxSelector()
+        current_bbox = initial_bbox
+        mouse_callback_set = False
+
+        frame_count = 0
+        tracking_bbox = None
+        last_processed_frame = None
+        fps_counter = FPSCounter()
+
+        # ウィンドウを事前に作成
+        cv2.namedWindow("Realtime Shamisen Tracker", cv2.WINDOW_AUTOSIZE)
+        print("カメラウィンドウを作成しました")
+
+        try:
+            print("リアルタイム処理を開始します...")
+            print("カメラフィードを待機中...")
+
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    print("フレームの取得に失敗しました")
+                    # 少し待ってから再試行
+                    cv2.waitKey(10)
+                    continue
+
+                # 最初のフレームを取得したら報告
+                if frame_count == 0:
+                    print(f"最初のフレームを取得しました: {frame.shape}")
+
+                fps_counter.update()
+                display_frame = frame.copy()
+
+                # バウンディングボックスが設定されていない場合
+                if current_bbox is None:
+                    if not mouse_callback_set:
+                        print("マウスコールバックを設定中...")
+                        cv2.setMouseCallback(
+                            "Realtime Shamisen Tracker",
+                            bbox_selector.mouse_callback,
+                        )
+                        mouse_callback_set = True
+                        print("マウスコールバックを設定完了")
+
+                    # バウンディングボックス選択中の描画
+                    bbox_selector.draw_selection(display_frame)
+                    current_bbox = bbox_selector.get_bbox()
+
+                    if current_bbox is not None:
+                        print(f"バウンディングボックスが設定されました: {current_bbox}")
+
+                    # 指示文を表示
+                    cv2.putText(
+                        display_frame,
+                        "Select shamisen neck with mouse",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 255, 0),
+                        2,
+                    )
+                    cv2.putText(
+                        display_frame,
+                        "Drag to select area, then release mouse",
+                        (10, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 0),
+                        2,
+                    )
+                else:
+                    # バウンディングボックスが設定済み - 処理開始
+                    if frame_count % sam_interval == 0:
+                        print(f"フレーム {frame_count} でSAM検出を実行中...")
+
+                        # 最初のSAM実行時は設定されたbboxを使用
+                        bbox_to_use = current_bbox if tracking_bbox is None else None
+
+                        processed_frame, new_tracking_bbox = self.process_frame(
+                            frame,
+                            bbox_to_use,
+                            tracking_bbox,
+                        )
+
+                        if new_tracking_bbox is not None:
+                            tracking_bbox = new_tracking_bbox
+                            print("  > 物体を追跡中")
+                        else:
+                            print("  > 警告: 物体を見失いました")
+
+                        last_processed_frame = processed_frame
+                    else:
+                        # SAM処理しないフレームは前回の結果を使用
+                        processed_frame = (
+                            last_processed_frame if last_processed_frame is not None else frame
+                        )
+
+                    display_frame = processed_frame
+
+                # FPS表示
+                current_fps = fps_counter.get_fps()
+                cv2.putText(
+                    display_frame,
+                    f"FPS: {current_fps:.1f}",
+                    (display_frame.shape[1] - 150, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                )
+
+                # 録画状態表示
+                if is_recording:
+                    cv2.circle(display_frame, (30, 30), 10, (0, 0, 255), -1)
+                    cv2.putText(
+                        display_frame,
+                        "REC",
+                        (50, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                    )
+
+                # 画面表示を確実に行う
+                cv2.imshow("Realtime Shamisen Tracker", display_frame)
+
+                # 画面の更新を強制
+                cv2.waitKey(1)
+
+                # 録画処理
+                if is_recording and writer is not None:
+                    writer.write(display_frame)
+
+                # キー入力処理
+                key = cv2.waitKey(30) & 0xFF  # 30ms待機でキー入力検出
+                if key == ord("q") or key == 27:  # 'q' または ESC
+                    break
+                if key == ord("s"):  # スクリーンショット
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    screenshot_path = f"screenshot_{timestamp}.jpg"
+                    cv2.imwrite(screenshot_path, display_frame)
+                    print(f"スクリーンショットを保存: {screenshot_path}")
+                elif key == ord("r"):  # 録画切り替え
+                    if not is_recording:
+                        # 録画開始
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        record_path = output_path or f"recording_{timestamp}.mp4"
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        writer = cv2.VideoWriter(record_path, fourcc, fps, (width, height))
+                        is_recording = True
+                        print(f"録画開始: {record_path}")
+                    else:
+                        # 録画停止
+                        if writer:
+                            writer.release()
+                            writer = None
+                        is_recording = False
+                        print("録画停止")
+
+                frame_count += 1
+
+        except Exception as e:
+            print(f"リアルタイム処理中にエラーが発生しました: {e}")
+        finally:
+            # リソースの解放
+            cap.release()
+            if writer:
+                writer.release()
+            cv2.destroyAllWindows()
+            print("リアルタイム処理を終了しました")
+
     def _trim_mask_by_x_coordinate(
         self,
         mask_array: np.ndarray,
@@ -1269,20 +1572,57 @@ class ShamisenFretHandTracker:
 
 
 def main() -> None:
-    """メイン処理 - 動画処理モード"""
+    """メイン処理 - リアルタイムカメラ処理モード"""
+    # パラメータ設定
+    trim_ratio = 0.9  # マスクトリミング倍率 (0.0-1.0)
+    sam_interval = 2  # SAM処理の間隔 (フレーム数)
+
+    # リアルタイム処理用設定
+    camera_id = 4  # カメラID (通常は0)
+    initial_bbox = None  # 手動でバウンディングボックスを設定
+    output_path = None  # 録画しない場合はNone
+
+    # トラッカーの初期化
+    tracker = ShamisenFretHandTracker(
+        model_name="sam2.1_t.pt",
+        trim_ratio=trim_ratio,
+    )
+
+    print("三味線フレット・手指先リアルタイム検出システム")
+    print("=" * 50)
+    print(f"マスクトリミング倍率: {trim_ratio}")
+    print(f"SAM処理間隔: {sam_interval} フレーム")
+    print(f"カメラID: {camera_id}")
+    print()
+    print("使用方法:")
+    print("1. カメラ画面で三味線の棹をマウスで囲んでください")
+    print("2. 'q' または ESC キーで終了")
+    print("3. 's' キーでスクリーンショット保存")
+    print("4. 'r' キーで録画開始/停止")
+
+    # リアルタイム処理の実行
+    try:
+        tracker.process_realtime(
+            camera_id=camera_id,
+            initial_bbox=initial_bbox,
+            sam_interval=sam_interval,
+            output_path=output_path,
+        )
+    except KeyboardInterrupt:
+        print("\nキーボード割り込みで終了しました")
+    except Exception as e:
+        print(f"\nエラーが発生しました: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+
+def main_video() -> None:
+    """動画ファイル処理モード (従来の処理)"""
     # 設定パラメータ
-
-    # 初期化
-
     video_path = "data/seg.mp4"  # 入力動画のパス
     initial_bbox = [600, 300, 1900, 800]  # 初期バウンディングボックス
     output_path = "data/output_shamisen_v3a.mp4"  # 出力動画のパス
-
-    # 動画処理の設定
-    # video_path = "data/ForMovie3.mp4"
-    # initial_bbox = [600, 400, 1700, 800]
-    # output_path = "data/output_shamisen_v3b.mp4"  # 出力動画のパス
-
     sam_interval = 5
     max_frames = 180
     trim_ratio = 0.86  # マスクトリミング倍率: 0.0-1.0
@@ -1332,6 +1672,6 @@ def main_image() -> None:
 
 
 if __name__ == "__main__":
-    # 動画処理をデフォルトに変更
-    # 画像処理を実行したい場合は main_image() を呼び出してください
+    # リアルタイムカメラ処理をデフォルトに変更
+    # 動画ファイル処理を実行したい場合は main_video() を呼び出してください
     main()
