@@ -107,7 +107,18 @@ class ShamisenFretHandTracker:
         """
         # SAMモデルの初期化
         self.sam_model = SAM(model_name)
-        self.sam_model.to("cuda:0")  # GPUに移動
+        
+        # デバイスの自動選択（Mac対応）
+        import torch
+        if torch.backends.mps.is_available():
+            device = "mps"  # Mac GPU (Metal Performance Shaders)
+        elif torch.cuda.is_available():
+            device = "cuda:0"  # NVIDIA GPU
+        else:
+            device = "cpu"  # CPU
+        
+        self.sam_model.to(device)
+        print(f"SAMモデルを{device}で実行します")
 
         # トリミング設定
         self.trim_ratio = trim_ratio
@@ -1110,7 +1121,7 @@ class ShamisenFretHandTracker:
         video_path: str,
         initial_bbox: list[int],
         output_path: str | None = None,
-        sam_interval: int = 2,
+        sam_interval: int = 5,
         max_frames: int | None = None,
     ) -> None:
         """動画を処理してフレット位置と手の検出を行う
@@ -1575,10 +1586,10 @@ def main() -> None:
     """メイン処理 - リアルタイムカメラ処理モード"""
     # パラメータ設定
     trim_ratio = 0.9  # マスクトリミング倍率 (0.0-1.0)
-    sam_interval = 2  # SAM処理の間隔 (フレーム数)
+    sam_interval = 10  # SAM処理の間隔 (フレーム数)
 
     # リアルタイム処理用設定
-    camera_id = 4  # カメラID (通常は0)
+    camera_id = 1  # カメラID (通常は0)
     initial_bbox = None  # 手動でバウンディングボックスを設定
     output_path = None  # 録画しない場合はNone
 
@@ -1623,7 +1634,7 @@ def main_video() -> None:
     video_path = "data/seg.mp4"  # 入力動画のパス
     initial_bbox = [600, 300, 1900, 800]  # 初期バウンディングボックス
     output_path = "data/output_shamisen_v3a.mp4"  # 出力動画のパス
-    sam_interval = 5
+    sam_interval = 10
     max_frames = 180
     trim_ratio = 0.86  # マスクトリミング倍率: 0.0-1.0
 
