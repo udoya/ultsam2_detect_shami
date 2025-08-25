@@ -5,6 +5,8 @@ SAM2とMediaPipeを使用してフレット位置と指の位置を同時に検�
 
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 from ultralytics import SAM
 from ultralytics.utils.plotting import colors
+
+# 音声処理用ライブラリ
+try:
+    import pyaudio
+
+    PYAUDIO_AVAILABLE = True
+except ImportError:
+    PYAUDIO_AVAILABLE = False
+    print("警告: PyAudioが利用できません。音声機能は無効になります。")
+    print("PyAudioをインストールするには: pip install pyaudio")
 
 # 日本語フォントの設定
 mpl.rcParams["font.family"] = [
@@ -92,6 +104,151 @@ class FPSCounter:
             return 0.0
         time_span = self.timestamps[-1] - self.timestamps[0]
         return (len(self.timestamps) - 1) / max(time_span, 0.001)
+
+
+class AudioProcessor:
+    """リアルタイム音声処理クラス"""
+
+    def __init__(
+        self,
+        sample_rate: int = 44100,
+        chunk_size: int = 1024,
+        channels: int = 1,
+        input_device_index: int | None = None,
+        output_device_index: int | None = None,
+    ):
+        """音声処理の初期化
+
+        Args:
+            sample_rate: サンプリングレート
+            chunk_size: チャンクサイズ
+            channels: チャンネル数
+            input_device_index: 入力デバイスのインデックス
+            output_device_index: 出力デバイスのインデックス
+
+        """
+        if not PYAUDIO_AVAILABLE:
+            print("PyAudioが利用できないため、音声機能は無効です")
+            self.enabled = False
+            return
+
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        self.channels = channels
+        self.input_device_index = input_device_index
+        self.output_device_index = output_device_index
+        self.enabled = True
+
+        # PyAudioの初期化
+        self.audio = pyaudio.PyAudio()
+        self.audio_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.input_stream = None
+        self.output_stream = None
+
+    def list_audio_devices(self):
+        """利用可能な音声デバイスを一覧表示"""
+        if not self.enabled:
+            return
+
+        print("利用可能な音声デバイス:")
+        for i in range(self.audio.get_device_count()):
+            device_info = self.audio.get_device_info_by_index(i)
+            print(
+                f"  {i}: {device_info['name']} (入力: {device_info['maxInputChannels']}, 出力: {device_info['maxOutputChannels']})"
+            )
+
+    def start_audio_passthrough(self):
+        """音声のパススルー処理を開始"""
+        if not self.enabled:
+            print("音声機能が無効のため、パススルーを開始できません")
+            return
+
+        try:
+            # 入力ストリームの設定
+            self.input_stream = self.audio.open(
+                format=pyaudio.paFloat32,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                input_device_index=self.input_device_index,
+                frames_per_buffer=self.chunk_size,
+                stream_callback=self._input_callback,
+            )
+
+            # 出力ストリームの設定
+            self.output_stream = self.audio.open(
+                format=pyaudio.paFloat32,
+                channels=self.channels,
+                rate=self.sample_rate,
+                output=True,
+                output_device_index=self.output_device_index,
+                frames_per_buffer=self.chunk_size,
+                stream_callback=self._output_callback,
+            )
+
+            # ストリーム開始
+            self.input_stream.start_stream()
+            self.output_stream.start_stream()
+            print(f"音声パススルーを開始しました (サンプリングレート: {self.sample_rate}Hz)")
+
+        except Exception as e:
+            print(f"音声ストリームの開始に失敗しました: {e}")
+            self.enabled = False
+
+    def _input_callback(self, in_data, frame_count, time_info, status):
+        """音声入力のコールバック"""
+        if status:
+            print(f"音声入力エラー: {status}")
+
+        # 音声データをキューに追加
+        try:
+            self.audio_queue.put_nowait(in_data)
+        except queue.Full:
+            # キューが満杯の場合は古いデータを削除
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.put_nowait(in_data)
+            except queue.Empty:
+                pass
+
+        return (None, pyaudio.paContinue)
+
+    def _output_callback(self, in_data, frame_count, time_info, status):
+        """音声出力のコールバック"""
+        if status:
+            print(f"音声出力エラー: {status}")
+
+        try:
+            # キューから音声データを取得
+            audio_data = self.audio_queue.get_nowait()
+            return (audio_data, pyaudio.paContinue)
+        except queue.Empty:
+            # データがない場合は無音を出力
+            silence = b"\x00" * (frame_count * self.channels * 4)  # float32のため4バイト
+            return (silence, pyaudio.paContinue)
+
+    def stop_audio_passthrough(self):
+        """音声パススルーを停止"""
+        if not self.enabled:
+            return
+
+        self.stop_event.set()
+
+        if self.input_stream:
+            self.input_stream.stop_stream()
+            self.input_stream.close()
+
+        if self.output_stream:
+            self.output_stream.stop_stream()
+            self.output_stream.close()
+
+        print("音声パススルーを停止しました")
+
+    def __del__(self):
+        """デストラクタ"""
+        if hasattr(self, "audio") and self.audio:
+            self.audio.terminate()
 
 
 class ShamisenFretHandTracker:
@@ -1127,8 +1284,11 @@ class ShamisenFretHandTracker:
         camera_width: int = 1280,
         camera_height: int = 720,
         camera_fps: int = 30,
+        enable_audio: bool = True,
+        audio_input_device: int | None = None,
+        audio_output_device: int | None = None,
     ) -> None:
-        """リアルタイムカメラqからの映像を処理してフレット位置と手の検出を行う
+        """リアルタイムカメラからの映像と音声を処理してフレット位置と手の検出を行う
 
         Args:
             camera_id: カメラのID（通常は0）
@@ -1138,6 +1298,9 @@ class ShamisenFretHandTracker:
             camera_width: カメラの幅（ピクセル）
             camera_height: カメラの高さ（ピクセル）
             camera_fps: カメラのFPS
+            enable_audio: 音声機能の有効/無効
+            audio_input_device: 音声入力デバイスのインデックス
+            audio_output_device: 音声出力デバイスのインデックス
 
         """
         # カメラの初期化
@@ -1190,6 +1353,25 @@ class ShamisenFretHandTracker:
 
         print(f"テストフレーム: {test_frame.shape}, dtype: {test_frame.dtype}")
         print("カメラの初期化が完了しました")
+
+        # 音声機能の初期化
+        audio_processor = None
+        if enable_audio and PYAUDIO_AVAILABLE:
+            print("音声機能を初期化中...")
+            audio_processor = AudioProcessor(
+                input_device_index=audio_input_device,
+                output_device_index=audio_output_device,
+            )
+
+            # 音声デバイス一覧を表示
+            audio_processor.list_audio_devices()
+
+            # 音声パススルーを開始
+            audio_processor.start_audio_passthrough()
+        elif enable_audio:
+            print("音声機能が有効ですが、PyAudioが利用できません")
+        else:
+            print("音声機能は無効です")
         print("操作:")
         print("  'q' または ESC: 終了")
         print("  's': スクリーンショット保存")
@@ -1381,6 +1563,11 @@ class ShamisenFretHandTracker:
             if writer:
                 writer.release()
             cv2.destroyAllWindows()
+
+            # 音声処理の終了
+            if audio_processor:
+                audio_processor.stop_audio_passthrough()
+
             print("リアルタイム処理を終了しました")
 
     def _trim_mask_by_x_coordinate(
@@ -1506,6 +1693,11 @@ def main() -> None:
     camera_height = 720  # カメラの高さ（ピクセル）
     camera_fps = 30  # カメラのFPS
 
+    # 音声設定
+    enable_audio = True  # 音声パススルーを有効にする
+    audio_input_device = None  # 音声入力デバイスID (Noneで自動選択)
+    audio_output_device = None  # 音声出力デバイスID (Noneで自動選択)
+
     # リアルタイム処理用設定
     initial_bbox = None  # 手動でバウンディングボックスを設定
     output_path = None  # 録画しない場合はNone
@@ -1522,6 +1714,9 @@ def main() -> None:
     print(f"SAM処理間隔: {sam_interval} フレーム")
     print(f"カメラID: {camera_id}")
     print(f"カメラサイズ: {camera_width}x{camera_height}, {camera_fps}fps")
+    print(f"音声パススルー: {'有効' if enable_audio else '無効'}")
+    if enable_audio and not PYAUDIO_AVAILABLE:
+        print("  ⚠️ PyAudioが利用できません - 音声機能は無効になります")
     print()
     print("使用方法:")
     print("1. カメラ画面で三味線の棹をマウスで囲んでください")
@@ -1540,6 +1735,9 @@ def main() -> None:
             camera_width=camera_width,
             camera_height=camera_height,
             camera_fps=camera_fps,
+            enable_audio=enable_audio,
+            audio_input_device=audio_input_device,
+            audio_output_device=audio_output_device,
         )
     except KeyboardInterrupt:
         print("\nキーボード割り込みで終了しました")
@@ -1548,6 +1746,16 @@ def main() -> None:
         import traceback
 
         traceback.print_exc()
+
+
+def test_audio_devices() -> None:
+    """音声デバイステスト用関数"""
+    if not PYAUDIO_AVAILABLE:
+        print("PyAudioが利用できません")
+        return
+
+    audio_processor = AudioProcessor()
+    audio_processor.list_devices()
 
 
 if __name__ == "__main__":
