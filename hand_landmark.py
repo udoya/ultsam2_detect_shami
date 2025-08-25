@@ -1,25 +1,20 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-import os
-import copy
 import argparse
-from typing import List, Any, Dict, Tuple, Union
-
-import cv2
-import numpy as np
-import mediapipe as mp  # type:ignore
-from mediapipe.tasks import python  # type:ignore
-from mediapipe.tasks.python import vision  # type:ignore
-
-from utils import CvFpsCalc
-from utils.download_file import download_file
-import matplotlib.pyplot as plt
-
-import torch
-from segment_anything import sam_model_registry, SamPredictor
+import copy
 import datetime
 import os
+from typing import Any, Dict, List, Tuple, Union
 
+import cv2
+import matplotlib.pyplot as plt
+import mediapipe as mp  # type:ignore
+import numpy as np
+import torch
+from mediapipe.tasks import python  # type:ignore
+from mediapipe.tasks.python import vision  # type:ignore
+from segment_anything import SamPredictor, sam_model_registry
+from utils import CvFpsCalc
+from utils.download_file import download_file
 
 
 def get_args() -> argparse.Namespace:
@@ -92,12 +87,12 @@ def main() -> None:
         num_hands=num_hands,
     )
     detector: vision.HandLandmarker = vision.HandLandmarker.create_from_options(
-        options
+        options,
     )  # type:ignore
 
     # FPS計測モジュール
     cvFpsCalc: CvFpsCalc = CvFpsCalc(buffer_len=10)
-# World座標プロット
+    # World座標プロット
     if use_world_landmark:
         fig = plt.figure()
         r_ax = fig.add_subplot(121, projection="3d")  # type:ignore
@@ -109,7 +104,7 @@ def main() -> None:
     # カメラキャプチャ
     frame = cv2.imread(picture_path)
 
-    #frameとしてはforsegment.mp4の10secの位置にある画像を使用
+    # frameとしてはforsegment.mp4の10secの位置にある画像を使用
     # video_path = "data/forsegment.mp4"  # 動画のパス
     # cap = cv2.VideoCapture(video_path)
     # if not cap.isOpened():
@@ -121,7 +116,6 @@ def main() -> None:
     # if not ret:
     #     print("フレームを読み込めませんでした。")
     #     return
-
 
     # 推論実施
     rgb_frame: mp.Image = mp.Image(
@@ -195,7 +189,7 @@ def main() -> None:
 
     # brownの部分について
     # y座標を、右手のbboxのy座標の最大値-100に設定し、それ以上のy座標の点を取得
-    tmp_min_y = bboxes[0][1] +100
+    tmp_min_y = bboxes[0][1] + 100
 
     # x座標は、右手のbboxのxmax+50に設定し、その範囲の点を取得
     tmp_min_x = bboxes[0][2] + 50
@@ -203,8 +197,11 @@ def main() -> None:
         for y in range(frame.shape[0] // 3, tmp_min_y, 16):
             for x in range(tmp_min_x, frame.shape[1], 16):
                 if cv2.pointPolygonTest(contour, (x, y), False) == 1:
-                    #ただし、左手のbbox領域内は除外
-                    if bboxes[1][0] - 10 < x < bboxes[1][2] + 10 and bboxes[1][1]-10 < y < bboxes[1][3]+10:
+                    # ただし、左手のbbox領域内は除外
+                    if (
+                        bboxes[1][0] - 10 < x < bboxes[1][2] + 10
+                        and bboxes[1][1] - 10 < y < bboxes[1][3] + 10
+                    ):
                         continue
                     points.append([x, y])
                     point_labels = np.append(point_labels, 1)
@@ -217,15 +214,14 @@ def main() -> None:
     tmp_max_y = bboxes[0][1]
 
     for contour in contours_white:
-        for x in range(tmp_min_x, int(width*0.5), 8):
+        for x in range(tmp_min_x, int(width * 0.5), 8):
             for y in range(tmp_max_y, frame.shape[0], 8):
                 if cv2.pointPolygonTest(contour, (x, y), False) == 1:
-                    #ただし、左手のbbox領域内は除外
+                    # ただし、左手のbbox領域内は除外
                     if bboxes[1][0] < x < bboxes[1][2] and bboxes[1][1] < y < bboxes[1][3]:
                         continue
                     # points.append([x, y])
                     # point_labels = np.append(point_labels, 0)
-
 
     # ポイントをNumPy配列に変換
     if len(points) > 0:
@@ -260,7 +256,7 @@ def main() -> None:
     edges = cv2.Canny(gray_mask, 50, 150, apertureSize=3)
     lines = cv2.HoughLines(edges, 1, np.pi / 180, 100)
 
-    #ハフ変換のlineのrho thetaを平均化
+    # ハフ変換のlineのrho thetaを平均化
     if lines is not None:
         rho_values = []
         theta_values = []
@@ -291,8 +287,6 @@ def main() -> None:
         cv2.line(mask_overlay, (x11, y11), (x21, y21), (255, 0, 0), 2)  # 青色で描画
         cv2.line(debug_image, (x11, y11), (x21, y21), (255, 0, 0), 2)
 
-
-
         rho2 = avg_rho + (avg_rho - lines[0][0][0])
         x02 = a * rho2
         y02 = b * rho2
@@ -303,8 +297,6 @@ def main() -> None:
         cv2.line(mask_overlay, (x12, y12), (x22, y22), (0, 255, 0), 2)  # 緑色で描画
         cv2.line(debug_image, (x12, y12), (x22, y22), (0, 255, 0), 2)
 
-
-
     cv2.imwrite(f"img3/mask_overlay2_{timestamp}.jpg", mask_overlay)
 
     # バウンディングボックスの取得
@@ -314,12 +306,14 @@ def main() -> None:
     bbox_segment = [x_min, y_min, x_max, y_max]
 
     # バウンディングボックスの描画
-    cv2.rectangle(debug_image, (bbox_segment[0], bbox_segment[1]), (bbox_segment[2], bbox_segment[3]), (0, 255, 0), 2)
+    cv2.rectangle(
+        debug_image,
+        (bbox_segment[0], bbox_segment[1]),
+        (bbox_segment[2], bbox_segment[3]),
+        (0, 255, 0),
+        2,
+    )
     cv2.imwrite(f"img3/frame_with_bbox_{timestamp}.jpg", debug_image)
-
-
-
-
 
     # 画面反映
     # cv2.imshow("MediaPipe Hand Landmarks Detection Demo", debug_image)
@@ -328,7 +322,8 @@ def main() -> None:
 
 
 def calc_bounding_rect(
-    image: np.ndarray, detection_result: vision.HandLandmarkerResult
+    image: np.ndarray,
+    detection_result: vision.HandLandmarkerResult,
 ) -> List[List[int]]:
     image_width, image_height = image.shape[1], image.shape[0]
 
@@ -619,18 +614,15 @@ def draw_world_landmarks(
         ax_list[handedness_index].plot(thumb_x, thumb_y, thumb_z)
         ax_list[handedness_index].plot(index_finger_x, index_finger_y, index_finger_z)
         ax_list[handedness_index].plot(
-            middle_finger_x, middle_finger_y, middle_finger_z
+            middle_finger_x,
+            middle_finger_y,
+            middle_finger_z,
         )
         ax_list[handedness_index].plot(ring_finger_x, ring_finger_y, ring_finger_z)
         ax_list[handedness_index].plot(pinky_x, pinky_y, pinky_z)
 
     plt.pause(0.001)
 
-    return
-
 
 if __name__ == "__main__":
-
-
-
     main()

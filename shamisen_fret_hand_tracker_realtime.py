@@ -167,7 +167,8 @@ class ShamisenFretHandTracker:
 
     def _init_hand_detector(self) -> None:
         """MediaPipe Hand Landmarkerの初期化"""
-        model_path = Path("./model/hand_landmarker_float16.task")
+        # model_path = Path("./model/hand_landmarker_float16.task")
+        model_path = Path("./model/hand_landmarker.task")
 
         if not model_path.exists():
             print(f"警告: {model_path} が見つかりません。手の検出機能は無効になります。")
@@ -1193,6 +1194,7 @@ class ShamisenFretHandTracker:
         print("  'q' または ESC: 終了")
         print("  's': スクリーンショット保存")
         print("  'r': 録画開始/停止")
+        print("  't': バウンディングボックス再設定")
         if initial_bbox is None:
             print("  マウスで三味線の棹を囲んでバウンディングボックスを設定してください")
 
@@ -1359,6 +1361,15 @@ class ShamisenFretHandTracker:
                             writer = None
                         is_recording = False
                         print("録画停止")
+                elif key == ord("t"):  # バウンディングボックス再設定
+                    print("バウンディングボックスの再設定を開始します...")
+                    current_bbox = None
+                    tracking_bbox = None
+                    last_processed_frame = None
+                    # バウンディングボックスセレクターをリセット
+                    bbox_selector = BoundingBoxSelector()
+                    mouse_callback_set = False
+                    print("マウスで三味線の棹を再度選択してください")
 
                 frame_count += 1
 
@@ -1517,6 +1528,7 @@ def main() -> None:
     print("2. 'q' または ESC キーで終了")
     print("3. 's' キーでスクリーンショット保存")
     print("4. 'r' キーで録画開始/停止")
+    print("5. 't' キーでバウンディングボックス再設定")
 
     # リアルタイム処理の実行
     try:
