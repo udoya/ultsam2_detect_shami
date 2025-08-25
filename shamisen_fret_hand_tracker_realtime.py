@@ -107,16 +107,17 @@ class ShamisenFretHandTracker:
         """
         # SAMモデルの初期化
         self.sam_model = SAM(model_name)
-        
+
         # デバイスの自動選択（Mac対応）
         import torch
+
         if torch.backends.mps.is_available():
             device = "mps"  # Mac GPU (Metal Performance Shaders)
         elif torch.cuda.is_available():
             device = "cuda:0"  # NVIDIA GPU
         else:
             device = "cpu"  # CPU
-        
+
         self.sam_model.to(device)
         print(f"SAMモデルを{device}で実行します")
 
@@ -1116,123 +1117,15 @@ class ShamisenFretHandTracker:
             if Path(temp_image_path).exists():
                 Path(temp_image_path).unlink()
 
-    def process_video(
-        self,
-        video_path: str,
-        initial_bbox: list[int],
-        output_path: str | None = None,
-        sam_interval: int = 5,
-        max_frames: int | None = None,
-    ) -> None:
-        """動画を処理してフレット位置と手の検出を行う
-
-        Args:
-            video_path: 入力動画のパス
-            initial_bbox: 初期バウンディングボックス
-            output_path: 出力動画のパス
-            sam_interval: SAM処理の間隔（フレーム数）
-            max_frames: 処理する最大フレーム数（Noneで全フレーム）
-
-        """
-        # 動画の読み込み
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print(f"エラー: 動画ファイルを開けませんでした: {video_path}")
-            return
-
-        # 動画の設定取得
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        print(f"動画情報: {width}x{height}, {fps:.2f}fps, {total_frames}フレーム")
-
-        # 出力動画の設定
-        writer = None
-        if output_path:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-        print("動画処理を開始...")
-        frame_count = 0
-        tracking_bbox = None
-        last_processed_frame = None
-
-        try:
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    print("すべてのフレームの処理が完了しました")
-                    break
-
-                if frame is None:
-                    print(f"フレーム {frame_count} をスキップしました（空のフレーム）")
-                    continue
-
-                # SAM処理のタイミング判定
-                if frame_count % sam_interval == 0:
-                    print(f"フレーム {frame_count} でSAM検出を実行中...")
-
-                    # 最初のフレームは初期bboxを使用、以降は追跡bboxを使用
-                    bbox_to_use = initial_bbox if frame_count == 0 else None
-
-                    processed_frame, new_tracking_bbox = self.process_frame(
-                        frame,
-                        bbox_to_use,
-                        tracking_bbox,
-                    )
-
-                    if new_tracking_bbox is not None:
-                        tracking_bbox = new_tracking_bbox
-                        print(f"  > 物体を追跡中。新しいbbox: {tracking_bbox}")
-                    else:
-                        print("  > 警告: 物体を見失いました。追跡を停止します。")
-                        tracking_bbox = None
-
-                    last_processed_frame = processed_frame
-                else:
-                    # SAM処理しないフレームは前回の結果を使用
-                    processed_frame = (
-                        last_processed_frame if last_processed_frame is not None else frame
-                    )
-
-                # 結果の書き込み
-                if writer and processed_frame is not None:
-                    writer.write(processed_frame)
-
-                frame_count += 1
-
-                # 最大フレーム数の制限
-                if max_frames and frame_count >= max_frames:
-                    print(f"最大フレーム数 {max_frames} に到達しました")
-                    break
-
-                # 進捗表示
-                if frame_count % 30 == 0:  # 30フレームごとに進捗表示
-                    progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
-                    print(f"進捗: {frame_count}/{total_frames} フレーム ({progress:.1f}%)")
-
-        except Exception as e:
-            print(f"動画処理中にエラーが発生しました: {e}")
-        finally:
-            # リソースの解放
-            cap.release()
-            if writer:
-                writer.release()
-            cv2.destroyAllWindows()
-
-            if output_path:
-                print(f"処理完了! 出力動画: {output_path}")
-            else:
-                print("処理完了!")
-
     def process_realtime(
         self,
         camera_id: int = 3,
         initial_bbox: list[int] | None = None,
         sam_interval: int = 2,
         output_path: str | None = None,
+        camera_width: int = 1280,
+        camera_height: int = 720,
+        camera_fps: int = 30,
     ) -> None:
         """リアルタイムカメラqからの映像を処理してフレット位置と手の検出を行う
 
@@ -1241,6 +1134,9 @@ class ShamisenFretHandTracker:
             initial_bbox: 初期バウンディングボックス（Noneの場合は手動設定）
             sam_interval: SAM処理の間隔（フレーム数）
             output_path: 録画保存先パス（Noneで録画しない）
+            camera_width: カメラの幅（ピクセル）
+            camera_height: カメラの高さ（ピクセル）
+            camera_fps: カメラのFPS
 
         """
         # カメラの初期化
@@ -1266,10 +1162,10 @@ class ShamisenFretHandTracker:
         print(f"カメラ {camera_id} を正常に開きました")
 
         # カメラの設定を試行
-        print("カメラの設定を行います...")
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        print(f"カメラの設定を行います... {camera_width}x{camera_height}, {camera_fps}fps")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_height)
+        cap.set(cv2.CAP_PROP_FPS, camera_fps)
 
         # 実際の設定を取得
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1277,6 +1173,11 @@ class ShamisenFretHandTracker:
         fps = cap.get(cv2.CAP_PROP_FPS)
 
         print(f"カメラ情報: {width}x{height}, {fps:.2f}fps")
+        if width != camera_width or height != camera_height:
+            print(
+                f"注意: 要求された解像度 {camera_width}x{camera_height} と"
+                f"実際の解像度 {width}x{height} が異なります",
+            )
 
         # テストフレームの取得
         print("テストフレームを取得中...")
@@ -1588,8 +1489,13 @@ def main() -> None:
     trim_ratio = 0.9  # マスクトリミング倍率 (0.0-1.0)
     sam_interval = 10  # SAM処理の間隔 (フレーム数)
 
+    # カメラ設定
+    camera_id = 4  # カメラID (通常は0)
+    camera_width = 1280  # カメラの幅（ピクセル）
+    camera_height = 720  # カメラの高さ（ピクセル）
+    camera_fps = 30  # カメラのFPS
+
     # リアルタイム処理用設定
-    camera_id = 1  # カメラID (通常は0)
     initial_bbox = None  # 手動でバウンディングボックスを設定
     output_path = None  # 録画しない場合はNone
 
@@ -1604,6 +1510,7 @@ def main() -> None:
     print(f"マスクトリミング倍率: {trim_ratio}")
     print(f"SAM処理間隔: {sam_interval} フレーム")
     print(f"カメラID: {camera_id}")
+    print(f"カメラサイズ: {camera_width}x{camera_height}, {camera_fps}fps")
     print()
     print("使用方法:")
     print("1. カメラ画面で三味線の棹をマウスで囲んでください")
@@ -1618,6 +1525,9 @@ def main() -> None:
             initial_bbox=initial_bbox,
             sam_interval=sam_interval,
             output_path=output_path,
+            camera_width=camera_width,
+            camera_height=camera_height,
+            camera_fps=camera_fps,
         )
     except KeyboardInterrupt:
         print("\nキーボード割り込みで終了しました")
@@ -1628,61 +1538,5 @@ def main() -> None:
         traceback.print_exc()
 
 
-def main_video() -> None:
-    """動画ファイル処理モード (従来の処理)"""
-    # 設定パラメータ
-    video_path = "data/seg.mp4"  # 入力動画のパス
-    initial_bbox = [600, 300, 1900, 800]  # 初期バウンディングボックス
-    output_path = "data/output_shamisen_v3a.mp4"  # 出力動画のパス
-    sam_interval = 10
-    max_frames = 180
-    trim_ratio = 0.86  # マスクトリミング倍率: 0.0-1.0
-
-    tracker = ShamisenFretHandTracker(model_name="sam2.1_t.pt", trim_ratio=trim_ratio)
-
-    print(f"設定: trim_ratio = {trim_ratio}")
-    print("三味線のフレット位置と手の検出(動画)を開始...")
-    tracker.process_video(
-        video_path=video_path,
-        initial_bbox=initial_bbox,
-        output_path=output_path,
-        sam_interval=sam_interval,
-        max_frames=max_frames,
-    )
-
-    print("動画処理が完了しました。")
-
-
-def main_image() -> None:
-    """画像処理モード(従来の処理)"""
-    # 設定パラメータ
-    trim_ratio = 0.9  # マスクトリミング倍率（0.0-1.0）
-
-    # 初期化
-    tracker = ShamisenFretHandTracker(model_name="sam2.1_t.pt", trim_ratio=trim_ratio)
-
-    # 設定
-    image_path = "./data/image.png"
-    bbox = [300, 20, 780, 380]
-    # 出力ディレクトリ設定
-    timestamp_mmdd = time.strftime("%m%d")
-    output_dir = f"./out/{timestamp_mmdd}/shamisen_fret_hand"
-
-    print(f"設定: trim_ratio = {trim_ratio}")
-    print("三味線のフレット位置と手の検出を開始...")
-    result_image = tracker.process_image(image_path, bbox, output_dir)
-
-    # 結果表示
-    plt.figure(figsize=(20, 12))
-    plt.imshow(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB))
-    plt.title("Shamisen Fret Position Detection + Left Hand Tracking", fontsize=16)
-    plt.axis("on")
-    plt.show()
-
-    print("処理が完了しました。")
-
-
 if __name__ == "__main__":
-    # リアルタイムカメラ処理をデフォルトに変更
-    # 動画ファイル処理を実行したい場合は main_video() を呼び出してください
     main()
