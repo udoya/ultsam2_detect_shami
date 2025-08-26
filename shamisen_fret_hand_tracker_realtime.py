@@ -28,6 +28,18 @@ except ImportError:
     print("警告: PyAudioが利用できません。音声機能は無効になります。")
     print("PyAudioをインストールするには: pip install pyaudio")
 
+# 音程解析用ライブラリ
+try:
+    import librosa
+    import librosa.display
+    from scipy.signal import butter, lfilter
+
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    print("警告: librosaまたはscipyが利用できません。音程検出機能は無効になります。")
+    print("ライブラリをインストールするには: pip install librosa scipy")
+
 # 日本語フォントの設定
 mpl.rcParams["font.family"] = [
     "DejaVu Sans",
@@ -146,6 +158,11 @@ class AudioProcessor:
         self.input_stream = None
         self.output_stream = None
 
+        # 音程検出用の追加設定
+        self.pitch_queue = queue.Queue(maxsize=5)
+        self.current_pitch_info = {"frequency": 0.0, "note": "", "octave": 0}
+        self.pitch_detector = PitchDetector(self.sample_rate, self.chunk_size)
+
     def list_audio_devices(self):
         """利用可能な音声デバイスを一覧表示"""
         if not self.enabled:
@@ -155,7 +172,7 @@ class AudioProcessor:
         for i in range(self.audio.get_device_count()):
             device_info = self.audio.get_device_info_by_index(i)
             print(
-                f"  {i}: {device_info['name']} (入力: {device_info['maxInputChannels']}, 出力: {device_info['maxOutputChannels']})"
+                f"  {i}: {device_info['name']} (入力: {device_info['maxInputChannels']}, 出力: {device_info['maxOutputChannels']})",
             )
 
     def start_audio_passthrough(self):
@@ -212,6 +229,38 @@ class AudioProcessor:
             except queue.Empty:
                 pass
 
+        # 音程検出処理
+        if self.pitch_detector.enabled:
+            try:
+                # バイトデータをnumpy配列に変換
+                audio_array = np.frombuffer(in_data, dtype=np.float32)
+
+                # 音程検出
+                frequency, note, octave = self.pitch_detector.detect_pitch(audio_array)
+
+                # 音程情報を更新
+                pitch_info = {
+                    "frequency": frequency,
+                    "note": note,
+                    "octave": octave,
+                    "note_display": f"{note}{octave}" if note else "",
+                }
+
+                # キューに追加（古いデータは削除）
+                try:
+                    self.pitch_queue.put_nowait(pitch_info)
+                except queue.Full:
+                    try:
+                        self.pitch_queue.get_nowait()
+                        self.pitch_queue.put_nowait(pitch_info)
+                    except queue.Empty:
+                        pass
+
+                self.current_pitch_info = pitch_info
+
+            except Exception as e:
+                print(f"音程検出エラー: {e}")
+
         return (None, pyaudio.paContinue)
 
     def _output_callback(self, in_data, frame_count, time_info, status):
@@ -245,10 +294,175 @@ class AudioProcessor:
 
         print("音声パススルーを停止しました")
 
+    def get_current_pitch(self) -> dict:
+        """現在の音程情報を取得"""
+        if not self.enabled:
+            return {"frequency": 0.0, "note": "", "octave": 0, "note_display": ""}
+        return self.current_pitch_info.copy()
+
     def __del__(self):
         """デストラクタ"""
         if hasattr(self, "audio") and self.audio:
             self.audio.terminate()
+
+
+class PitchDetector:
+    """リアルタイム音程検出クラス（HPS処理付き）"""
+
+    def __init__(self, sample_rate: int = 44100, buffer_size: int = 4096):
+        """初期化
+
+        Args:
+            sample_rate: サンプリングレート
+            buffer_size: バッファサイズ
+
+        """
+        self.sample_rate = sample_rate
+        self.buffer_size = buffer_size
+        self.enabled = LIBROSA_AVAILABLE
+
+        if not self.enabled:
+            print("LibrosaまたはScipyが利用できないため、音程検出は無効です")
+            return
+
+        # 音程から音名への変換テーブル
+        self.note_names = [
+            "C",
+            "C#",
+            "D",
+            "D#",
+            "E",
+            "F",
+            "F#",
+            "G",
+            "G#",
+            "A",
+            "A#",
+            "B",
+        ]
+
+        # 三味線の音域設定 (C2からC7まで)
+        self.min_freq = 65.4  # C2
+        self.max_freq = 2093.0  # C7
+
+        # HPSパラメータ
+        self.num_hps = 4
+
+        # ピッチ検出の安定化用
+        self.pitch_history = []
+        self.history_size = 5
+
+    def hps(self, spectrum: np.ndarray) -> np.ndarray:
+        """Harmonic Product Spectrum (HPS) 処理
+
+        Args:
+            spectrum: 入力スペクトラム
+
+        Returns:
+            HPS処理されたスペクトラム
+
+        """
+        if not self.enabled:
+            return spectrum
+
+        hps_spectrum = spectrum.copy()
+
+        # HPS処理: 倍音の積を計算
+        for h in range(2, self.num_hps + 1):
+            # スペクトラムをh分の1にダウンサンプリング
+            downsampled_len = len(spectrum) // h
+            downsampled = spectrum[::h][:downsampled_len]
+
+            # 元のスペクトラムとの積を計算
+            hps_spectrum[:downsampled_len] *= downsampled
+
+        return hps_spectrum
+
+    def detect_pitch(self, audio_data: np.ndarray) -> tuple[float, str, int]:
+        """音程を検出する
+
+        Args:
+            audio_data: 音声データ (numpy array)
+
+        Returns:
+            (frequency, note_name, octave) のタプル
+
+        """
+        if not self.enabled or len(audio_data) == 0:
+            return 0.0, "", 0
+
+        try:
+            # FFTを実行
+            fft = np.fft.rfft(audio_data)
+            spectrum = np.abs(fft)
+
+            # HPS処理を適用
+            hps_spectrum = self.hps(spectrum)
+
+            # 周波数軸を作成
+            freqs = np.fft.rfftfreq(len(audio_data), 1 / self.sample_rate)
+
+            # 三味線の音域内でピークを検索
+            valid_indices = np.where(
+                (freqs >= self.min_freq) & (freqs <= self.max_freq),
+            )[0]
+
+            if len(valid_indices) == 0:
+                return 0.0, "", 0
+
+            # HPS処理後のスペクトラムで最大値を検索
+            valid_spectrum = hps_spectrum[valid_indices]
+            max_idx = valid_indices[np.argmax(valid_spectrum)]
+
+            fundamental_freq = freqs[max_idx]
+
+            # 基本周波数が十分に大きい場合のみ処理
+            if fundamental_freq < self.min_freq:
+                return 0.0, "", 0
+
+            # 履歴を使って安定化
+            self.pitch_history.append(fundamental_freq)
+            if len(self.pitch_history) > self.history_size:
+                self.pitch_history.pop(0)
+
+            # 履歴の中央値を使用
+            stable_freq = np.median(self.pitch_history)
+
+            # 周波数から音名とオクターブを計算
+            note_name, octave = self.freq_to_note(stable_freq)
+
+            return stable_freq, note_name, octave
+
+        except Exception as e:
+            print(f"音程検出エラー: {e}")
+            return 0.0, "", 0
+
+    def freq_to_note(self, frequency: float) -> tuple[str, int]:
+        """周波数から音名とオクターブを計算
+
+        Args:
+            frequency: 周波数 (Hz)
+
+        Returns:
+            (note_name, octave) のタプル
+
+        """
+        if frequency <= 0:
+            return "", 0
+
+        # A4 = 440Hz を基準とした計算
+        A4 = 440.0
+        C0 = A4 * np.power(2, -4.75)  # C0の周波数
+
+        if frequency < C0:
+            return "", 0
+
+        # セント値を計算
+        h = 12 * np.log2(frequency / C0)
+        octave = int(h // 12)
+        n = int(h % 12)
+
+        return self.note_names[n], octave
 
 
 class ShamisenFretHandTracker:
@@ -285,6 +499,9 @@ class ShamisenFretHandTracker:
         self.hand_detector = None
         if MEDIAPIPE_AVAILABLE:
             self._init_hand_detector()
+
+        # PitchDetectorの初期化
+        self.pitch_detector = PitchDetector()
 
         # フレット位置計算用の比率(平均律)
         self.fret_ratios = [
@@ -1128,6 +1345,95 @@ class ShamisenFretHandTracker:
                     cv2.LINE_AA,
                 )
 
+    def draw_pitch_info(self, image: np.ndarray, pitch_info: dict) -> np.ndarray:
+        """音程情報を画面に描画
+
+        Args:
+            image: 描画対象の画像
+            pitch_info: 音程情報
+
+        Returns:
+            描画後の画像
+
+        """
+        if not pitch_info or not pitch_info.get("note"):
+            return image
+
+        height, width = image.shape[:2]
+
+        # 描画設定
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.2
+        thickness = 3
+
+        # 音程情報テキスト
+        note_text = pitch_info.get("note_display", "")
+        freq_text = f"{pitch_info.get('frequency', 0):.1f} Hz"
+
+        if note_text:
+            # テキストサイズを取得
+            note_size = cv2.getTextSize(note_text, font, font_scale, thickness)[0]
+            freq_size = cv2.getTextSize(freq_text, font, font_scale * 0.7, thickness - 1)[0]
+
+            # 背景のサイズと位置
+            padding = 20
+            bg_width = max(note_size[0], freq_size[0]) + padding * 2
+            bg_height = note_size[1] + freq_size[1] + padding * 3
+
+            # 左上に配置
+            bg_x = 20
+            bg_y = 20
+
+            # 半透明の背景を描画
+            overlay = image.copy()
+            cv2.rectangle(
+                overlay,
+                (bg_x, bg_y),
+                (bg_x + bg_width, bg_y + bg_height),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.addWeighted(overlay, 0.7, image, 0.3, 0, image)
+
+            # 枠線を描画
+            cv2.rectangle(
+                image,
+                (bg_x, bg_y),
+                (bg_x + bg_width, bg_y + bg_height),
+                (0, 255, 255),  # 黄色の枠
+                2,
+            )
+
+            # 音名を大きく表示
+            note_x = bg_x + (bg_width - note_size[0]) // 2
+            note_y = bg_y + padding + note_size[1]
+            cv2.putText(
+                image,
+                note_text,
+                (note_x, note_y),
+                font,
+                font_scale,
+                (0, 255, 255),  # 黄色
+                thickness,
+                cv2.LINE_AA,
+            )
+
+            # 周波数を小さく表示
+            freq_x = bg_x + (bg_width - freq_size[0]) // 2
+            freq_y = note_y + padding + freq_size[1]
+            cv2.putText(
+                image,
+                freq_text,
+                (freq_x, freq_y),
+                font,
+                font_scale * 0.7,
+                (0, 200, 200),  # 薄い黄色
+                thickness - 1,
+                cv2.LINE_AA,
+            )
+
+        return image
+
     def process_image(
         self,
         image_path: str,
@@ -1494,6 +1800,11 @@ class ShamisenFretHandTracker:
                     (255, 255, 255),
                     2,
                 )
+
+                # 音程情報表示
+                if audio_processor and audio_processor.enabled:
+                    pitch_info = audio_processor.get_current_pitch()
+                    display_frame = self.draw_pitch_info(display_frame, pitch_info)
 
                 # 録画状態表示
                 if is_recording:

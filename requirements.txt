@@ -75,3 +75,8 @@ tomli==2.2.1
 opencv-stubs
 matplotlib-stubs
 mediapipe==0.10.15
+
+# 音声処理用ライブラリ
+pyaudio==0.2.14
+librosa==0.10.1
+soundfile==0.12.1
