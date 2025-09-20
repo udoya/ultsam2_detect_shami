@@ -1999,7 +1999,7 @@ def main() -> None:
     sam_interval = 10  # SAM処理の間隔 (フレーム数)
 
     # カメラ設定
-    camera_id = 4  # カメラID (通常は0)
+    camera_id = 3  # カメラID (通常は0)
     camera_width = 1280  # カメラの幅（ピクセル）
     camera_height = 720  # カメラの高さ（ピクセル）
     camera_fps = 30  # カメラのFPS

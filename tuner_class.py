@@ -43,19 +43,21 @@ except ImportError:
 
 
 class HarmonicProductSpectrum:
-    """Harmonic Product Spectrum (HPS) 処理クラス"""
+    """Harmonic Product Spectrum (HPS) 処理クラス - 改良版"""
 
-    def __init__(self, num_harmonics: int = 5):
+    def __init__(self, num_harmonics: int = 6, noise_floor: float = 0.01):
         """初期化
 
         Args:
             num_harmonics: 使用する倍音の数
+            noise_floor: ノイズフロア閾値
 
         """
         self.num_harmonics = num_harmonics
+        self.noise_floor = noise_floor
 
     def process(self, spectrum: np.ndarray) -> np.ndarray:
-        """HPS処理を実行
+        """改良されたHPS処理を実行
 
         Args:
             spectrum: 入力スペクトラム
@@ -67,16 +69,74 @@ class HarmonicProductSpectrum:
         if len(spectrum) == 0:
             return spectrum
 
-        hps_spectrum = spectrum.copy()
+        # スペクトラムを正規化
+        max_val = np.max(spectrum)
+        if max_val == 0:
+            return spectrum
 
-        # 各倍音の積を計算
+        normalized_spectrum = spectrum / max_val
+
+        # ノイズフロア以下をより厳しくカット
+        normalized_spectrum = np.where(
+            normalized_spectrum < self.noise_floor, 0, normalized_spectrum
+        )
+
+        # HPS処理前の前処理: 高周波ノイズの抑制
+        # 高周波部分（8kHz以上）を段階的に減衰
+        freq_bins = len(normalized_spectrum)
+        high_freq_start = int(freq_bins * 0.7)  # 全体の70%以降
+        if high_freq_start < freq_bins:
+            # 指数関数的減衰を適用
+            decay_factor = np.exp(-np.linspace(0, 3, freq_bins - high_freq_start))
+            normalized_spectrum[high_freq_start:] *= decay_factor
+
+        # HPS処理 - より強力な倍音除去
+        hps_spectrum = normalized_spectrum.copy()
+
+        # 重み付きHPS - 高次倍音ほど重みを強く減らす
         for h in range(2, self.num_harmonics + 1):
-            # スペクトラムをh分の1にダウンサンプリング
-            downsampled_len = len(spectrum) // h
-            if downsampled_len > 0:
-                downsampled = spectrum[::h][:downsampled_len]
-                # 元のスペクトラムとの積を計算
-                hps_spectrum[:downsampled_len] *= downsampled
+            downsampled_len = len(normalized_spectrum) // h
+            if downsampled_len > 20:  # 最小長制限を厳しく
+                # より強い重み減衰
+                weight = 1.0 / (h**1.2)  # 指数を1.2に増加
+
+                # ダウンサンプリング
+                downsampled = normalized_spectrum[::h][:downsampled_len]
+
+                # より強力な倍音抑制
+                hps_spectrum[:downsampled_len] *= downsampled**weight
+
+        # さらなる後処理: スパイク除去
+        # 中央値フィルタでスパイクノイズを除去
+        if len(hps_spectrum) > 7:
+            from scipy.signal import medfilt
+
+            try:
+                # 中央値フィルタ適用
+                hps_spectrum = medfilt(hps_spectrum, kernel_size=5)
+            except ImportError:
+                # scipyが使えない場合は簡易版
+                kernel_size = 3
+                filtered = np.zeros_like(hps_spectrum)
+                for i in range(len(hps_spectrum)):
+                    start = max(0, i - kernel_size // 2)
+                    end = min(len(hps_spectrum), i + kernel_size // 2 + 1)
+                    filtered[i] = np.median(hps_spectrum[start:end])
+                hps_spectrum = filtered
+
+        # より強い平滑化（ノイズ除去）
+        if len(hps_spectrum) > 9:
+            # ガウシアンカーネルでより強い平滑化
+            kernel = np.array([0.1, 0.2, 0.4, 0.2, 0.1])  # ガウシアン風
+            hps_spectrum = np.convolve(hps_spectrum, kernel, mode="same")
+
+        # 動的レンジ圧縮 - 強い信号をさらに抑制
+        hps_spectrum = np.power(hps_spectrum, 0.7)  # 0.7乗で圧縮
+
+        # 最終的な正規化
+        max_hps = np.max(hps_spectrum)
+        if max_hps > 0:
+            hps_spectrum = hps_spectrum / max_hps
 
         return hps_spectrum
 
@@ -116,18 +176,25 @@ class PitchDetector:
             "B",
         ]
 
-        # 楽器の音域設定 (C3からC7まで)
-        self.min_freq = 130.81  # C3
-        self.max_freq = 2093.0  # C7
+        # 楽器の音域設定 (拡張)
+        self.min_freq = 70.0  # さらに低い音域まで対応
+        self.max_freq = 2000.0  # 高音域を拡張
 
-        # HPS処理クラス
-        self.hps = HarmonicProductSpectrum(num_harmonics=3)
+        # HPS処理クラス（改良版パラメータ）
+        self.hps = HarmonicProductSpectrum(num_harmonics=6, noise_floor=0.01)
 
-        # ピッチ検出の安定化用
-        self.pitch_history = deque(maxlen=3)
+        # ピッチ検出の安定化用（履歴サイズ拡張）
+        self.pitch_history = deque(maxlen=5)
+
+        # 前処理用フィルタ
+        self.preemphasis_factor = 0.97
+
+        # 検出精度向上のための閾値
+        self.min_confidence = 0.25  # 最小信頼度を下げる
+        self.peak_threshold_ratio = 0.1  # ピーク閾値を緩和
 
     def detect_pitch(self, audio_data: np.ndarray) -> tuple[float, str, int, float]:
-        """音程を検出する
+        """改良された音程検出
 
         Args:
             audio_data: 音声データ (numpy array)
@@ -140,50 +207,119 @@ class PitchDetector:
             return 0.0, "", 0, 0.0
 
         try:
-            # 窓関数を適用
-            windowed = audio_data * np.hanning(len(audio_data))
+            # 前処理: プリエンファシス（高周波数成分を強調）
+            if len(audio_data) > 1:
+                emphasized = np.append(
+                    audio_data[0], audio_data[1:] - self.preemphasis_factor * audio_data[:-1]
+                )
+            else:
+                emphasized = audio_data
+
+            # 窓関数を適用（ハニング窓 + ガウシアンテーパリング）
+            window = np.hanning(len(emphasized))
+            # ガウシアンテーパリングでエッジ効果を減少
+            gaussian_taper = np.exp(
+                -0.5
+                * ((np.arange(len(emphasized)) - len(emphasized) / 2) / (len(emphasized) / 8)) ** 2
+            )
+            window = window * gaussian_taper
+            windowed = emphasized * window
+
+            # 信号の最小レベルチェック
+            rms = np.sqrt(np.mean(windowed**2))
+            if rms < 1e-8:  # さらに閾値を緩和
+                return 0.0, "", 0, 0.0
+
+            # ゼロパディングでFFT解像度を向上
+            padded_length = len(windowed) * 2
+            windowed_padded = np.pad(windowed, (0, padded_length - len(windowed)), "constant")
 
             # FFTを実行
-            fft = np.fft.rfft(windowed)
+            fft = np.fft.rfft(windowed_padded)
             spectrum = np.abs(fft)
+
+            # 周波数軸を作成
+            freqs = np.fft.rfftfreq(padded_length, 1 / self.sample_rate)
+
+            # DCオフセット除去
+            if len(spectrum) > 1:
+                spectrum[0] = 0
 
             # HPS処理を適用
             hps_spectrum = self.hps.process(spectrum)
-
-            # 周波数軸を作成
-            freqs = np.fft.rfftfreq(len(audio_data), 1 / self.sample_rate)
 
             # 楽器の音域内でピークを検索
             valid_indices = np.where(
                 (freqs >= self.min_freq) & (freqs <= self.max_freq),
             )[0]
 
-            if len(valid_indices) == 0:
+            if len(valid_indices) < 10:  # 最小データ点数チェック
                 return 0.0, "", 0, 0.0
 
-            # HPS処理後のスペクトラムで最大値を検索
             valid_spectrum = hps_spectrum[valid_indices]
+            valid_freqs = freqs[valid_indices]
 
-            # ノイズレベルより大きいピークのみ検出
+            # 動的閾値計算
             max_amplitude = np.max(valid_spectrum)
-            noise_threshold = max_amplitude * 0.1
+            mean_amplitude = np.mean(valid_spectrum)
+            std_amplitude = np.std(valid_spectrum)
+
+            # 動的ノイズ閾値を緩和
+            noise_threshold = mean_amplitude + self.peak_threshold_ratio * std_amplitude
+
+            # 最小閾値を設定（検出しやすくする）
+            min_threshold = max_amplitude * 0.05  # 最大値の5%
+            noise_threshold = max(noise_threshold, min_threshold)
 
             if max_amplitude < noise_threshold:
                 return 0.0, "", 0, 0.0
 
-            max_idx = valid_indices[np.argmax(valid_spectrum)]
-            fundamental_freq = freqs[max_idx]
+            # ピーク検出（局所最大値）
+            peak_indices = []
+            for i in range(1, len(valid_spectrum) - 1):
+                if (
+                    valid_spectrum[i] > valid_spectrum[i - 1]
+                    and valid_spectrum[i] > valid_spectrum[i + 1]
+                    and valid_spectrum[i] > noise_threshold
+                ):
+                    peak_indices.append(i)
 
-            # 基本周波数の信頼度を計算
-            confidence = max_amplitude / (np.mean(valid_spectrum) + 1e-10)
-            confidence = min(confidence / 10.0, 1.0)  # 正規化
+            if not peak_indices:
+                # ピークが見つからない場合は最大値を使用
+                max_idx = np.argmax(valid_spectrum)
+                fundamental_freq = valid_freqs[max_idx]
+            else:
+                # 最も強いピークを選択
+                peak_amplitudes = valid_spectrum[peak_indices]
+                strongest_peak_idx = peak_indices[np.argmax(peak_amplitudes)]
+                fundamental_freq = valid_freqs[strongest_peak_idx]
+
+            # 基本周波数の信頼度を計算（改良版）
+            signal_power = max_amplitude
+            noise_power = mean_amplitude
+            snr = signal_power / (noise_power + 1e-10)
+
+            # 信頼度の正規化（0-1）
+            confidence = min(np.log10(snr + 1) / 2.0, 1.0)
+
+            # 最小信頼度チェック
+            if confidence < self.min_confidence:
+                return 0.0, "", 0, 0.0
 
             # 履歴を使って安定化
             self.pitch_history.append(fundamental_freq)
 
-            # 履歴の中央値を使用（外れ値を除去）
+            # 履歴の統計的処理
             if len(self.pitch_history) >= 3:
-                stable_freq = np.median(list(self.pitch_history))
+                history_array = np.array(list(self.pitch_history))
+                # 外れ値除去のためのトリム平均
+                sorted_history = np.sort(history_array)
+                trim_size = len(sorted_history) // 4  # 25%をトリム
+                if trim_size > 0:
+                    trimmed = sorted_history[trim_size:-trim_size]
+                    stable_freq = np.mean(trimmed)
+                else:
+                    stable_freq = np.median(history_array)
             else:
                 stable_freq = fundamental_freq
 
@@ -249,7 +385,7 @@ class MelSpectrogramProcessor:
         self.mel_history = deque(maxlen=self.history_size)
 
     def process(self, audio_data: np.ndarray) -> np.ndarray:
-        """メルスペクトログラムを計算
+        """改良されたメルスペクトログラムを計算
 
         Args:
             audio_data: 音声データ
@@ -262,20 +398,82 @@ class MelSpectrogramProcessor:
             return np.zeros((self.n_mels, 1))
 
         try:
-            # メルスペクトログラムを計算
+            # 信号レベルチェック
+            rms = np.sqrt(np.mean(audio_data**2))
+            if rms < 1e-8:  # さらに非常に小さい信号も検出
+                # 無音状態として処理
+                mel_frame = np.full(self.n_mels, -80.0)  # -80dB
+                self.mel_history.append(mel_frame)
+                return np.zeros((self.n_mels, 1))
+
+            # 前処理: オーディオデータの前処理強化
+            # DCオフセット除去
+            audio_processed = audio_data - np.mean(audio_data)
+
+            # プリエンファシス（高周波成分強調）を弱めに設定
+            preemphasis = 0.95
+            if len(audio_processed) > 1:
+                audio_processed = np.append(
+                    audio_processed[0], audio_processed[1:] - preemphasis * audio_processed[:-1]
+                )
+
+            # メルスペクトログラムを計算（パラメータをさらに調整）
             mel_spec = librosa.feature.melspectrogram(
-                y=audio_data,
+                y=audio_processed,
                 sr=self.sample_rate,
                 n_mels=self.n_mels,
                 n_fft=self.n_fft,
-                hop_length=self.n_fft // 4,
+                hop_length=self.n_fft // 8,  # より細かい時間解像度
+                window="hann",
+                fmin=60.0,  # より低い周波数からカバー
+                fmax=6000.0,  # 高周波数をさらに制限
+                power=1.5,  # パワーを1.5に調整（2.0より弱く）
+                center=True,
+                pad_mode="reflect",
             )
 
-            # dBスケールに変換
-            mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+            # dBスケールに変換（より保守的な設定）
+            mel_spec_db = librosa.power_to_db(
+                mel_spec,
+                ref=np.max,
+                top_db=60.0,  # ダイナミックレンジをさらに制限
+                amin=1e-12,  # 最小値をより小さく
+            )
 
-            # 時間軸の平均を取る（リアルタイム表示用）
-            mel_frame = np.mean(mel_spec_db, axis=1)
+            # 時間軸の統計処理（ノイズ減少強化）
+            if mel_spec_db.shape[1] > 1:
+                # パーセンタイル処理でノイズ除去
+                mel_frame = np.percentile(mel_spec_db, 25, axis=1)  # 25パーセンタイル使用
+            else:
+                mel_frame = mel_spec_db.flatten()
+
+            # 強力なノイズゲート適用
+            noise_floor = np.percentile(mel_frame, 10)  # 10パーセンタイルをノイズフロアとする
+            mel_frame = np.where(mel_frame < noise_floor + 20, noise_floor, mel_frame)
+
+            # 時間方向の平滑化を強化
+            if len(self.mel_history) > 0:
+                prev_frame = self.mel_history[-1]
+                # より強い平滑化
+                alpha = 0.5  # 現在フレームの重みを下げる
+                mel_frame = alpha * mel_frame + (1 - alpha) * prev_frame
+
+                # さらに前々フレームとも平均化
+                if len(self.mel_history) > 1:
+                    prev_prev_frame = self.mel_history[-2]
+                    mel_frame = 0.6 * mel_frame + 0.3 * prev_frame + 0.1 * prev_prev_frame
+
+            # 周波数方向の平滑化も追加
+            if len(mel_frame) > 5:
+                # ガウシアンフィルタ風の平滑化
+                kernel = np.array([0.05, 0.25, 0.4, 0.25, 0.05])
+                mel_frame = np.convolve(mel_frame, kernel, mode="same")
+
+            # 異常値の除去
+            median_val = np.median(mel_frame)
+            mad = np.median(np.abs(mel_frame - median_val))
+            threshold = median_val + 3 * mad
+            mel_frame = np.where(mel_frame > threshold, threshold, mel_frame)
 
             # 履歴に追加
             self.mel_history.append(mel_frame)
@@ -360,7 +558,7 @@ class RealtimeTuner:
     def __init__(
         self,
         sample_rate: int = 44100,
-        chunk_size: int = 4096,
+        chunk_size: int = 8192,  # バッファサイズを大きくして安定性向上
         input_device_index: int | None = None,
         output_device_index: int | None = None,
         enable_passthrough: bool = True,
@@ -621,7 +819,13 @@ class RealtimeTuner:
         return image
 
     def _draw_pitch_display(
-        self, image: np.ndarray, x: int, y: int, width: int, height: int, pitch_info: dict
+        self,
+        image: np.ndarray,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        pitch_info: dict,
     ):
         """音程表示を描画"""
         # 背景
@@ -698,7 +902,13 @@ class RealtimeTuner:
             )
 
     def _draw_volume_display(
-        self, image: np.ndarray, x: int, y: int, width: int, height: int, volume_info: dict
+        self,
+        image: np.ndarray,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        volume_info: dict,
     ):
         """音量表示を描画"""
         # 背景
@@ -788,7 +998,13 @@ class RealtimeTuner:
         )
 
     def _draw_mel_display(
-        self, image: np.ndarray, x: int, y: int, width: int, height: int, mel_data: np.ndarray
+        self,
+        image: np.ndarray,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        mel_data: np.ndarray,
     ):
         """メルスペクトログラム表示を描画"""
         # 背景

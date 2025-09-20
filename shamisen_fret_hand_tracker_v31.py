@@ -1590,7 +1590,7 @@ def main() -> None:
     sam_interval = 10  # SAM処理の間隔 (フレーム数)
 
     # リアルタイム処理用設定
-    camera_id = 4  # カメラID (通常は0)
+    camera_id = 3  # カメラID (通常は0)
     initial_bbox = None  # 手動でバウンディングボックスを設定
     output_path = None  # 録画しない場合はNone
 
